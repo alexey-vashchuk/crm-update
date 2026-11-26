@@ -54,9 +54,7 @@
       }
       #print-area {
         display: block !important;
-        position: absolute !important;
-        top: 0 !important;
-        left: 0 !important;
+        position: static !important;
         margin: 0 !important;
         padding: 0 !important;
         background: #ffffff !important;
@@ -312,7 +310,7 @@
     // =========================================================================
     // 0. APPLICATION VERSION & CLOUD UPDATE METADATA
     // =========================================================================
-    const APP_VERSION = '2.2.1';
+    const APP_VERSION = '2.2.2';
     const APP_BUILD_DATE = '2026-11-26';
 
     // =========================================================================
@@ -572,7 +570,7 @@
     };
 
     // =========================================================================
-    // 4. UTILITIES (FORMATTING, TOASTS, MODALS, FIREBASE ARRAY CONVERTERS)
+    // 4. UTILITIES (FORMATTING, UNIVERSAL DATE PARSER, TOASTS, MODALS)
     // =========================================================================
     function escapeHtml(str) {
       return String(str == null ? '' : str)
@@ -735,13 +733,72 @@
       return `${getTodayPrefix()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
     }
 
-    function addDaysToIsoDate(isoDateStr, days) {
-      const clean = String(isoDateStr || getTodayPrefix()).slice(0, 10);
-      const parts = clean.split('-').map(Number);
-      if (parts.length !== 3 || parts.some(isNaN)) return getTodayPrefix();
+    function buildValidIsoDate(year, month, day) {
+      const y = Number(year), m = Number(month), d = Number(day);
+      if (!isFinite(y) || !isFinite(m) || !isFinite(d)) return '';
+      if (y < 1990 || y > 2100 || m < 1 || m > 12 || d < 1 || d > 31) return '';
+      const dt = new Date(Date.UTC(y, m - 1, d));
+      if (dt.getUTCFullYear() !== y || (dt.getUTCMonth() + 1) !== m || dt.getUTCDate() !== d) return '';
+      return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+
+    // Universal date normalizer: handles YYYY-MM-DD, DD.MM.YYYY, DD/MM/YYYY, YYYY.MM.DD, timestamps, etc.
+    function normalizeDateToIso(raw) {
+      if (raw == null || raw === '') return '';
+      if (raw instanceof Date && !isNaN(raw.getTime())) {
+        return buildValidIsoDate(raw.getFullYear(), raw.getMonth() + 1, raw.getDate());
+      }
+      if (typeof raw === 'number' && isFinite(raw) && raw > 0) {
+        const ms = raw < 1e11 ? raw * 1000 : raw;
+        const dt = new Date(ms);
+        if (!isNaN(dt.getTime())) {
+          return buildValidIsoDate(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate());
+        }
+        return '';
+      }
+      const s = String(raw).trim();
+      if (!s) return '';
+
+      // 1) YYYY-MM-DD or YYYY.MM.DD or YYYY/MM/DD (with optional time)
+      let m = s.match(/^(\d{4})[-./](\d{1,2})[-./](\d{1,2})(?:[T\s].*)?$/);
+      if (m) return buildValidIsoDate(m[1], m[2], m[3]);
+
+      // 2) DD.MM.YYYY or DD/MM/YYYY or DD-MM-YYYY (with optional time)
+      m = s.match(/^(\d{1,2})[-./](\d{1,2})[-./](\d{4})(?:[T\s].*)?$/);
+      if (m) {
+        const p1 = Number(m[1]), p2 = Number(m[2]), y = Number(m[3]);
+        if (p1 <= 12 && p2 > 12) return buildValidIsoDate(y, p1, p2);
+        return buildValidIsoDate(y, p2, p1);
+      }
+
+      // 3) DD.MM.YY or DD/MM/YY (2-digit year)
+      m = s.match(/^(\d{1,2})[-./](\d{1,2})[-./](\d{2})(?:[T\s].*)?$/);
+      if (m) {
+        const yy = Number(m[3]);
+        const fullYear = yy <= 50 ? (2000 + yy) : (1900 + yy);
+        return buildValidIsoDate(fullYear, m[2], m[1]);
+      }
+
+      // 4) Pure numeric timestamp string
+      if (/^\d{9,13}$/.test(s)) {
+        const num = Number(s);
+        const ms = num < 1e11 ? num * 1000 : num;
+        const dt = new Date(ms);
+        if (!isNaN(dt.getTime())) {
+          return buildValidIsoDate(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate());
+        }
+      }
+
+      return '';
+    }
+
+    function addDaysToIsoDate(dateStr, days) {
+      const iso = normalizeDateToIso(dateStr);
+      if (!iso) return '';
+      const parts = iso.split('-').map(Number);
       const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
       dt.setUTCDate(dt.getUTCDate() + (Number(days) || 0));
-      return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+      return buildValidIsoDate(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate());
     }
 
     function formatPhoneUa(raw) {
@@ -797,6 +854,7 @@
       return {
         intake: {
           paperFormat: 'a5',
+          orientation: 'portrait',
           fitToA4Top: true,
           offsetTopMm: 0,
           customWidthMm: 148,
@@ -819,6 +877,7 @@
         },
         issue: {
           paperFormat: 'a5',
+          orientation: 'portrait',
           fitToA4Top: true,
           offsetTopMm: 0,
           customWidthMm: 148,
@@ -856,13 +915,18 @@
 
     function getPaperDimensions(tpl) {
       const preset = PAPER_PRESETS[tpl.paperFormat] || PAPER_PRESETS.a5;
-      if (tpl.paperFormat === 'custom') {
-        return {
-          widthMm: Math.max(40, Number(tpl.customWidthMm) || 148),
-          heightMm: Math.max(40, Number(tpl.customHeightMm) || 210)
-        };
+      let w = tpl.paperFormat === 'custom'
+        ? Math.max(40, Number(tpl.customWidthMm) || 148)
+        : preset.widthMm;
+      let h = tpl.paperFormat === 'custom'
+        ? Math.max(40, Number(tpl.customHeightMm) || 210)
+        : preset.heightMm;
+      if (tpl.orientation === 'landscape' && tpl.paperFormat !== 'custom') {
+        const tmp = w;
+        w = h;
+        h = tmp;
       }
-      return { widthMm: preset.widthMm, heightMm: preset.heightMm };
+      return { widthMm: w, heightMm: h };
     }
 
     function createEmptyDB() {
@@ -913,6 +977,9 @@
         if (e.name) empByName.set(String(e.name).trim().toLowerCase(), e);
       });
 
+      let repairedAnyDates = false;
+      const todayIso = getTodayPrefix();
+
       db.orders.forEach(o => {
         if (!o) return;
 
@@ -940,8 +1007,36 @@
           }
         }
 
-        if (o.status === 'issued' && o.issuedDate && Number(o.warrantyDays) > 0 && !o.warrantyUntil) {
-          o.warrantyUntil = addDaysToIsoDate(o.issuedDate, Number(o.warrantyDays));
+        // Normalize issuedDate & warrantyUntil to strict YYYY-MM-DD
+        const rawIssued = o.issuedDate ?? o.issueDate ?? o.dateIssued ?? o.closedAt ?? o.completedAt ?? '';
+        const normIssued = normalizeDateToIso(rawIssued);
+        if (normIssued && o.issuedDate !== normIssued) {
+          o.issuedDate = normIssued;
+          repairedAnyDates = true;
+        }
+
+        const rawUntil = o.warrantyUntil ?? o.warrantyEnd ?? o.warrantyDate ?? o.guaranteeUntil ?? '';
+        let normUntil = normalizeDateToIso(rawUntil);
+        const wDays = Math.max(0, Number(o.warrantyDays ?? o.guaranteeDays ?? 0) || 0);
+
+        if (o.status === 'issued') {
+          if (normIssued && wDays > 0) {
+            const expectedUntil = addDaysToIsoDate(normIssued, wDays);
+            if (expectedUntil && (!normUntil || normUntil === todayIso || normUntil !== expectedUntil)) {
+              normUntil = expectedUntil;
+            }
+          } else if (!normIssued && !normUntil && wDays > 0 && o.createdAt) {
+            const normCreated = normalizeDateToIso(o.createdAt);
+            if (normCreated && normCreated < todayIso) {
+              o.issuedDate = normCreated;
+              normUntil = addDaysToIsoDate(normCreated, wDays);
+            }
+          }
+        }
+
+        if ((o.warrantyUntil || '') !== normUntil) {
+          o.warrantyUntil = normUntil;
+          repairedAnyDates = true;
         }
       });
 
@@ -949,6 +1044,8 @@
         const defaultMaster = db.employees.find(e => e.role === 'master');
         db.currentUserId = (defaultMaster || db.employees[0]).id;
       }
+
+      return repairedAnyDates;
     }
 
     // =========================================================================
@@ -1368,20 +1465,24 @@
     }
 
     // =========================================================================
-    // 9. ORDERS VIEW (TABS, SORTING, KPI, PAGINATION)
+    // 9. ORDERS VIEW (TABS, ACCURATE WARRANTY/ARCHIVE SORTING, KPI, PAGINATION)
     // =========================================================================
     function getWarrantyUntilDate(order) {
-      if (order.warrantyUntil) return String(order.warrantyUntil).slice(0, 10);
-      if (order.issuedDate && Number(order.warrantyDays) > 0) {
-        return addDaysToIsoDate(order.issuedDate, Number(order.warrantyDays));
+      if (!order) return '';
+      const directIso = normalizeDateToIso(order.warrantyUntil ?? order.warrantyEnd ?? order.warrantyDate ?? '');
+      const normIssued = normalizeDateToIso(order.issuedDate ?? order.issueDate ?? '');
+      const wDays = Math.max(0, Number(order.warrantyDays ?? order.guaranteeDays ?? 0) || 0);
+
+      if (normIssued && wDays > 0) {
+        return addDaysToIsoDate(normIssued, wDays);
       }
-      return '';
+      return directIso;
     }
 
     function isOrderOnWarranty(order) {
-      if (order.status !== 'issued' || order.deleted) return false;
+      if (!order || order.status !== 'issued' || order.deleted) return false;
       const until = getWarrantyUntilDate(order);
-      if (!until) return false;
+      if (!until || !/^\d{4}-\d{2}-\d{2}$/.test(until)) return false;
       return until >= getTodayPrefix();
     }
 
@@ -1390,7 +1491,7 @@
         ordersSortDir = ordersSortDir === 'asc' ? 'desc' : 'asc';
       } else {
         ordersSortField = field;
-        ordersSortDir = field === 'id' ? 'desc' : 'asc';
+        ordersSortDir = (field === 'id' || field === 'warrantyUntil') ? 'desc' : 'asc';
       }
       renderWorkspace();
     }
@@ -1410,7 +1511,8 @@
           cntDeleted++;
           return;
         }
-        if (String(o.createdAt || '').startsWith(today)) cntToday++;
+        const createdIso = normalizeDateToIso(o.createdAt);
+        if (createdIso === today || String(o.createdAt || '').startsWith(today)) cntToday++;
         if (o.status === 'issued') {
           if (isOrderOnWarranty(o)) cntWarranty++;
           else cntArchive++;
@@ -1461,6 +1563,10 @@
           cmp = String(a.clientName || '').localeCompare(String(b.clientName || ''), 'uk');
         } else if (ordersSortField === 'status') {
           cmp = String(a.status || '').localeCompare(String(b.status || ''), 'uk');
+        } else if (ordersSortField === 'warrantyUntil') {
+          const da = getWarrantyUntilDate(a) || normalizeDateToIso(a.issuedDate) || a.deadline || '';
+          const dbDate = getWarrantyUntilDate(b) || normalizeDateToIso(b.issuedDate) || b.deadline || '';
+          cmp = String(da).localeCompare(String(dbDate));
         }
         return ordersSortDir === 'asc' ? cmp : -cmp;
       });
@@ -1546,7 +1652,7 @@
                   <th onclick="toggleOrdersSort('status')" class="py-3 px-3.5 cursor-pointer hover:text-gray-900 select-none">${escapeHtml(t('colStatus'))}${sortArrow('status')}</th>
                   <th class="py-3 px-3.5">${escapeHtml(t('colMaster'))}</th>
                   <th class="py-3 px-3.5">${escapeHtml(t('colSum'))}</th>
-                  <th class="py-3 px-3.5">${escapeHtml(t('colReadiness'))}</th>
+                  <th onclick="toggleOrdersSort('warrantyUntil')" class="py-3 px-3.5 cursor-pointer hover:text-gray-900 select-none">${escapeHtml(t('colReadiness'))}${sortArrow('warrantyUntil')}</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-gray-100">
@@ -1572,6 +1678,8 @@
       const total = getOrderTotal(order);
       const rowBg = order.approved && order.status !== 'issued' ? 'bg-emerald-50/60 hover:bg-emerald-50' : 'hover:bg-gray-50/80';
       const warrantyUntil = getWarrantyUntilDate(order);
+      const activeWarranty = isOrderOnWarranty(order);
+      const normIssued = normalizeDateToIso(order.issuedDate) || order.issuedDate || '';
 
       return `
         <tr onclick="openOrderModal('${escapeHtml(order.id)}')" class="${rowBg} cursor-pointer transition-colors">
@@ -1608,7 +1716,7 @@
           </td>
           <td class="py-3 px-3.5 align-top whitespace-nowrap text-[11px] text-gray-500">
             ${order.status === 'issued'
-              ? `<div>${escapeHtml(t('issuedTag'))}: ${escapeHtml(order.issuedDate || '')}</div>${warrantyUntil ? `<div class="text-teal-700 font-medium">Гарантія до ${escapeHtml(warrantyUntil)}</div>` : ''}`
+              ? `<div>${escapeHtml(t('issuedTag'))}: ${escapeHtml(normIssued || '—')}</div>${warrantyUntil ? (activeWarranty ? `<div class="text-teal-700 font-medium">Гарантія до ${escapeHtml(warrantyUntil)}</div>` : `<div class="text-gray-400">Гарантія минула (${escapeHtml(warrantyUntil)})</div>`) : ''}`
               : (order.deadline ? `До: ${escapeHtml(order.deadline)}` : '—')}
           </td>
         </tr>
@@ -1840,6 +1948,8 @@
       const total = getOrderTotal(order);
       const isIssued = order.status === 'issued';
       const warrantyUntil = getWarrantyUntilDate(order);
+      const activeWarranty = isOrderOnWarranty(order);
+      const normIssuedForInput = normalizeDateToIso(order.issuedDate) || getTodayPrefix();
 
       openModal(`
         <div class="p-5 sm:p-6 space-y-4 max-h-[92vh] overflow-y-auto text-xs">
@@ -1887,10 +1997,10 @@
             ${isIssued ? `
               <div class="sm:col-span-2">
                 <label class="block text-[11px] font-semibold text-gray-600 mb-1">Дата видачі клієнту</label>
-                <input type="date" value="${escapeHtml((order.issuedDate || getTodayPrefix()).slice(0, 10))}" onchange="updateOrderIssuedDate('${escapeHtml(order.id)}', this.value)" class="w-full rounded-xl border border-gray-200 px-3 py-1.5 bg-white" />
+                <input type="date" value="${escapeHtml(normIssuedForInput)}" onchange="updateOrderIssuedDate('${escapeHtml(order.id)}', this.value)" class="w-full rounded-xl border border-gray-200 px-3 py-1.5 bg-white" />
               </div>
-              <div class="sm:col-span-2 flex items-center justify-between px-3 py-2 rounded-xl bg-teal-50 border border-teal-200 text-teal-900">
-                <span>Гарантія діє до: <strong>${escapeHtml(warrantyUntil || 'без гарантії')}</strong></span>
+              <div class="sm:col-span-2 flex items-center justify-between px-3 py-2 rounded-xl ${activeWarranty ? 'bg-teal-50 border border-teal-200 text-teal-900' : 'bg-gray-100 border border-gray-200 text-gray-700'}">
+                <span>${warrantyUntil ? (activeWarranty ? `Гарантія діє до: <strong>${escapeHtml(warrantyUntil)}</strong>` : `Гарантія закінчилась: <strong>${escapeHtml(warrantyUntil)}</strong> (Архів)`) : 'Без гарантії (Архів)'}</span>
                 <button type="button" onclick="createWarrantyReturn('${escapeHtml(order.id)}')" class="px-2.5 py-1 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white font-semibold text-[11px]">
                   Повернення по гарантії
                 </button>
@@ -2053,10 +2163,11 @@
       if (!order) return;
       order.status = newStatus;
       if (newStatus === 'issued') {
-        if (!order.issuedDate) order.issuedDate = getTodayPrefix();
-        const wDays = Number(order.warrantyDays ?? db.defaultWarrantyDays ?? 30);
+        const normIssued = normalizeDateToIso(order.issuedDate) || getTodayPrefix();
+        order.issuedDate = normIssued;
+        const wDays = Math.max(0, Number(order.warrantyDays ?? db.defaultWarrantyDays ?? 30));
         order.warrantyDays = wDays;
-        order.warrantyUntil = wDays > 0 ? addDaysToIsoDate(order.issuedDate, wDays) : '';
+        order.warrantyUntil = wDays > 0 ? addDaysToIsoDate(normIssued, wDays) : '';
       }
       saveDB();
       renderWorkspace();
@@ -2097,8 +2208,10 @@
       if (!order) return;
       const d = Math.max(0, Number(daysVal) || 0);
       order.warrantyDays = d;
-      if (order.status === 'issued' && order.issuedDate) {
-        order.warrantyUntil = d > 0 ? addDaysToIsoDate(order.issuedDate, d) : '';
+      const normIssued = normalizeDateToIso(order.issuedDate);
+      if (order.status === 'issued' && normIssued) {
+        order.issuedDate = normIssued;
+        order.warrantyUntil = d > 0 ? addDaysToIsoDate(normIssued, d) : '';
       }
       saveDB();
       renderWorkspace();
@@ -2107,10 +2220,11 @@
 
     function updateOrderIssuedDate(orderId, isoDate) {
       const order = (db.orders || []).find(o => String(o.id) === String(orderId));
-      if (!order || !isoDate) return;
-      order.issuedDate = String(isoDate).slice(0, 10);
+      const norm = normalizeDateToIso(isoDate);
+      if (!order || !norm) return;
+      order.issuedDate = norm;
       const d = Math.max(0, Number(order.warrantyDays) || 0);
-      order.warrantyUntil = d > 0 ? addDaysToIsoDate(order.issuedDate, d) : '';
+      order.warrantyUntil = d > 0 ? addDaysToIsoDate(norm, d) : '';
       saveDB();
       renderWorkspace();
       openOrderModal(orderId);
@@ -2322,7 +2436,7 @@
           </div>
 
           <div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:4px; margin-bottom:3mm; font-size:0.9em;">
-            <div><strong>Дата:</strong> ${escapeHtml(isIntake ? (order.createdAt || getTodayPrefix()) : (order.issuedDate || getTodayPrefix()))}</div>
+            <div><strong>Дата:</strong> ${escapeHtml(isIntake ? (order.createdAt || getTodayPrefix()) : (normalizeDateToIso(order.issuedDate) || order.issuedDate || getTodayPrefix()))}</div>
             ${tpl.showBranch && branch.name ? `<div><strong>Точка:</strong> ${escapeHtml(branch.name)}</div>` : ''}
             ${tpl.showCompanyPhone && (branch.phone || db.companyPhone) ? `<div><strong>Тел.:</strong> ${escapeHtml(branch.phone || db.companyPhone)}</div>` : ''}
             ${tpl.showCompanyAddress && (branch.address || db.companyAddress) ? `<div><strong>Адреса:</strong> ${escapeHtml(branch.address || db.companyAddress)}</div>` : ''}
@@ -2379,19 +2493,30 @@
       const tpl = db.receiptTemplates[type] || db.receiptTemplates.intake;
       const dims = getPaperDimensions(tpl);
       const copies = Number(tpl.copiesPerPage) === 2 ? 2 : 1;
-      const useA4Top = (tpl.paperFormat === 'a5' || tpl.paperFormat === 'a6') && tpl.fitToA4Top !== false;
-      const pageW = useA4Top ? 210 : dims.widthMm;
-      const pageH = useA4Top ? 297 : dims.heightMm;
+      const isLandscape = tpl.orientation === 'landscape';
+      const useA4Sheet = (tpl.paperFormat === 'a5' || tpl.paperFormat === 'a6') && tpl.fitToA4Top !== false;
       const offsetTop = Number(tpl.offsetTopMm) || 0;
+
+      let pageSizeCss = `${dims.widthMm}mm ${dims.heightMm}mm`;
+      let printLandscape = isLandscape;
+
+      if (tpl.paperFormat === 'a4') {
+        pageSizeCss = isLandscape ? 'A4 landscape' : 'A4 portrait';
+      } else if (useA4Sheet) {
+        pageSizeCss = 'A4 portrait';
+        printLandscape = false;
+      }
 
       const dynStyle = document.getElementById('dynamic-print-style');
       if (dynStyle) {
-        dynStyle.textContent = `@media print { @page { size: ${pageW}mm ${pageH}mm; margin: 0; } }`;
+        dynStyle.textContent = `@media print { @page { size: ${pageSizeCss}; margin: 0; } }`;
       }
 
       const printArea = document.getElementById('print-area');
       if (!printArea) return;
       printArea.style.width = `${dims.widthMm}mm`;
+      printArea.style.marginLeft = '0';
+      printArea.style.marginRight = 'auto';
       printArea.style.marginTop = `${offsetTop}mm`;
       const singleHtml = renderSingleReceiptCopyHtml(order, type, tpl);
       printArea.innerHTML = copies === 2
@@ -2400,7 +2525,7 @@
 
       const targetPrinter = tpl.printerName || db.defaultPrinterName || '';
       if (StorageEngine.isElectron && db.silentPrintEnabled && window.electronAPI.silentPrint) {
-        const res = await window.electronAPI.silentPrint({ deviceName: targetPrinter });
+        const res = await window.electronAPI.silentPrint({ deviceName: targetPrinter, landscape: printLandscape });
         if (res && res.ok) {
           showToast('Квитанцію відправлено на друк!');
           return;
@@ -3544,6 +3669,7 @@
         "    if (!mainWindow) return resolve({ ok: false, error: 'No window' });",
         "    const printOpts = { silent: true, printBackground: true, margins: { marginType: 'none' } };",
         "    if (opts.deviceName) printOpts.deviceName = opts.deviceName;",
+        "    if (typeof opts.landscape === 'boolean') printOpts.landscape = opts.landscape;",
         "    mainWindow.webContents.print(printOpts, (success, failureReason) => {",
         "      if (success) resolve({ ok: true });",
         "      else resolve({ ok: false, error: failureReason || 'Print failed' });",
@@ -3622,6 +3748,7 @@
       ensureReceiptTemplates();
       const tpl = db.receiptTemplates[type];
       const isIntake = type === 'intake';
+      const dims = getPaperDimensions(tpl);
       openModal(`
         <div class="p-6 space-y-4 max-h-[90vh] overflow-y-auto text-xs">
           <div class="flex items-center justify-between border-b border-gray-100 pb-3">
@@ -3629,7 +3756,7 @@
             <button onclick="closeModal()" class="text-gray-400 font-bold">✕</button>
           </div>
 
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div>
               <label class="block font-semibold mb-1">Принтер для цієї квитанції</label>
               <select onchange="db.receiptTemplates['${type}'].printerName=this.value; saveDB();" class="w-full rounded-xl border border-gray-200 px-3 py-1.5 bg-white">
@@ -3638,9 +3765,16 @@
               </select>
             </div>
             <div>
-              <label class="block font-semibold mb-1">Формат паперу</label>
+              <label class="block font-semibold mb-1">Формат паперу (${dims.widthMm}×${dims.heightMm} мм)</label>
               <select onchange="db.receiptTemplates['${type}'].paperFormat=this.value; saveDB(); openReceiptEditorModal('${type}');" class="w-full rounded-xl border border-gray-200 px-3 py-1.5 bg-white">
                 ${Object.keys(PAPER_PRESETS).map(k => `<option value="${k}" ${tpl.paperFormat === k ? 'selected' : ''}>${escapeHtml(PAPER_PRESETS[k].label)}</option>`).join('')}
+              </select>
+            </div>
+            <div>
+              <label class="block font-semibold mb-1">Орієнтація сторінки</label>
+              <select onchange="db.receiptTemplates['${type}'].orientation=this.value; saveDB(); openReceiptEditorModal('${type}');" class="w-full rounded-xl border border-gray-200 px-3 py-1.5 bg-white">
+                <option value="portrait" ${(tpl.orientation || 'portrait') === 'portrait' ? 'selected' : ''}>Книжкова (Portrait)</option>
+                <option value="landscape" ${tpl.orientation === 'landscape' ? 'selected' : ''}>Альбомна (Landscape)</option>
               </select>
             </div>
           </div>
@@ -3649,11 +3783,11 @@
             <div class="grid grid-cols-2 gap-3">
               <div>
                 <label class="block font-semibold mb-1">Ширина (мм)</label>
-                <input type="number" min="40" max="400" value="${tpl.customWidthMm}" onchange="db.receiptTemplates['${type}'].customWidthMm=Number(this.value); saveDB();" class="w-full rounded-xl border border-gray-200 px-3 py-1.5" />
+                <input type="number" min="40" max="400" value="${tpl.customWidthMm}" onchange="db.receiptTemplates['${type}'].customWidthMm=Number(this.value); saveDB(); openReceiptEditorModal('${type}');" class="w-full rounded-xl border border-gray-200 px-3 py-1.5" />
               </div>
               <div>
                 <label class="block font-semibold mb-1">Висота (мм)</label>
-                <input type="number" min="40" max="500" value="${tpl.customHeightMm}" onchange="db.receiptTemplates['${type}'].customHeightMm=Number(this.value); saveDB();" class="w-full rounded-xl border border-gray-200 px-3 py-1.5" />
+                <input type="number" min="40" max="500" value="${tpl.customHeightMm}" onchange="db.receiptTemplates['${type}'].customHeightMm=Number(this.value); saveDB(); openReceiptEditorModal('${type}');" class="w-full rounded-xl border border-gray-200 px-3 py-1.5" />
               </div>
             </div>
           ` : ''}
@@ -3661,7 +3795,7 @@
           ${(tpl.paperFormat === 'a5' || tpl.paperFormat === 'a6') ? `
             <label class="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-teal-50/70 border border-teal-200 text-teal-900 cursor-pointer">
               <input type="checkbox" ${tpl.fitToA4Top !== false ? 'checked' : ''} onchange="db.receiptTemplates['${type}'].fitToA4Top=this.checked; saveDB();" />
-              <span>Друкувати строго у верхній частині стандартного аркуша A4 (щоб не зʼїжджало вниз)</span>
+              <span>У принтері лежить звичайний аркуш A4 (притискати квитанцію до верхнього лівого кута без центрування)</span>
             </label>
           ` : ''}
 
@@ -3779,7 +3913,6 @@
         try {
           let parsed = JSON.parse(reader.result);
           if (!parsed || typeof parsed !== 'object') throw new Error('Невірний формат файлу');
-          // Unwrap if exported from Firebase root or nested backup wrapper
           if (!parsed.orders && !parsed.companyName) {
             const wrapperKey = Object.keys(parsed).find(k => parsed[k] && typeof parsed[k] === 'object' && (parsed[k].orders || parsed[k].companyName || parsed[k].meta));
             if (wrapperKey) {
@@ -3936,6 +4069,7 @@
         if (!hasMeaningfulData) return false;
 
         this.isApplyingRemote = true;
+        let repairedDates = false;
         try {
           if (meta.companyName) db.companyName = meta.companyName;
           const remotePassHash = meta.directorPasswordHash || meta.masterPasswordHash || meta.adminPasswordHash || val.directorPasswordHash || '';
@@ -3962,7 +4096,7 @@
           db.parts = remoteParts;
           db.initialized = true;
 
-          normalizeAndMigrateDB();
+          repairedDates = normalizeAndMigrateDB();
           ensureReceiptTemplates();
 
           const now = new Date();
@@ -3984,6 +4118,9 @@
           return true;
         } finally {
           this.isApplyingRemote = false;
+          if (repairedDates) {
+            this.schedulePush();
+          }
         }
       },
 
@@ -4163,8 +4300,9 @@
     // =========================================================================
     window.addEventListener('DOMContentLoaded', async () => {
       await StorageEngine.init();
-      normalizeAndMigrateDB();
+      const repairedOnInit = normalizeAndMigrateDB();
       ensureReceiptTemplates();
+      if (repairedOnInit) StorageEngine.save(false);
       checkFirstRunSetup();
 
       const wsEl = document.getElementById('workspace');
