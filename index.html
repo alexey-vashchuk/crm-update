@@ -55,7 +55,8 @@
       #print-area {
         display: block !important;
         position: static !important;
-        margin: 0 !important;
+        margin-left: 0 !important;
+        margin-right: auto !important;
         padding: 0 !important;
         background: #ffffff !important;
         font-family: 'Inter', 'Segoe UI', Roboto, 'DejaVu Sans', sans-serif !important;
@@ -310,7 +311,7 @@
     // =========================================================================
     // 0. APPLICATION VERSION & CLOUD UPDATE METADATA
     // =========================================================================
-    const APP_VERSION = '2.2.2';
+    const APP_VERSION = '2.2.3';
     const APP_BUILD_DATE = '2026-11-26';
 
     // =========================================================================
@@ -742,7 +743,6 @@
       return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
     }
 
-    // Universal date normalizer: handles YYYY-MM-DD, DD.MM.YYYY, DD/MM/YYYY, YYYY.MM.DD, timestamps, etc.
     function normalizeDateToIso(raw) {
       if (raw == null || raw === '') return '';
       if (raw instanceof Date && !isNaN(raw.getTime())) {
@@ -759,11 +759,9 @@
       const s = String(raw).trim();
       if (!s) return '';
 
-      // 1) YYYY-MM-DD or YYYY.MM.DD or YYYY/MM/DD (with optional time)
       let m = s.match(/^(\d{4})[-./](\d{1,2})[-./](\d{1,2})(?:[T\s].*)?$/);
       if (m) return buildValidIsoDate(m[1], m[2], m[3]);
 
-      // 2) DD.MM.YYYY or DD/MM/YYYY or DD-MM-YYYY (with optional time)
       m = s.match(/^(\d{1,2})[-./](\d{1,2})[-./](\d{4})(?:[T\s].*)?$/);
       if (m) {
         const p1 = Number(m[1]), p2 = Number(m[2]), y = Number(m[3]);
@@ -771,7 +769,6 @@
         return buildValidIsoDate(y, p2, p1);
       }
 
-      // 3) DD.MM.YY or DD/MM/YY (2-digit year)
       m = s.match(/^(\d{1,2})[-./](\d{1,2})[-./](\d{2})(?:[T\s].*)?$/);
       if (m) {
         const yy = Number(m[3]);
@@ -779,7 +776,6 @@
         return buildValidIsoDate(fullYear, m[2], m[1]);
       }
 
-      // 4) Pure numeric timestamp string
       if (/^\d{9,13}$/.test(s)) {
         const num = Number(s);
         const ms = num < 1e11 ? num * 1000 : num;
@@ -854,11 +850,11 @@
       return {
         intake: {
           paperFormat: 'a5',
-          orientation: 'portrait',
+          orientation: 'landscape',
           fitToA4Top: true,
           offsetTopMm: 0,
-          customWidthMm: 148,
-          customHeightMm: 210,
+          customWidthMm: 210,
+          customHeightMm: 148,
           marginMm: 8,
           fontSizePt: 10,
           copiesPerPage: 1,
@@ -877,11 +873,11 @@
         },
         issue: {
           paperFormat: 'a5',
-          orientation: 'portrait',
+          orientation: 'landscape',
           fitToA4Top: true,
           offsetTopMm: 0,
-          customWidthMm: 148,
-          customHeightMm: 210,
+          customWidthMm: 210,
+          customHeightMm: 148,
           marginMm: 8,
           fontSizePt: 10,
           copiesPerPage: 1,
@@ -983,13 +979,9 @@
       db.orders.forEach(o => {
         if (!o) return;
 
-        // Safely extract works and prices from any schema or Firebase map
         o.works = extractOrderWorks(o);
-
-        // Normalize estimated price
         o.estimatedPrice = parseMoneyNumber(o.estimatedPrice ?? o.estPrice ?? o.approxPrice ?? 0);
 
-        // Restore master link by ID or name
         if (o.masterId && empById.has(String(o.masterId))) {
           o.masterName = empById.get(String(o.masterId)).name;
         } else if (o.masterName && empByName.has(String(o.masterName).trim().toLowerCase())) {
@@ -1007,7 +999,6 @@
           }
         }
 
-        // Normalize issuedDate & warrantyUntil to strict YYYY-MM-DD
         const rawIssued = o.issuedDate ?? o.issueDate ?? o.dateIssued ?? o.closedAt ?? o.completedAt ?? '';
         const normIssued = normalizeDateToIso(rawIssued);
         if (normIssued && o.issuedDate !== normIssued) {
@@ -2393,12 +2384,17 @@
     }
 
     // =========================================================================
-    // 12. RECEIPT RENDERING & PRINTING (1 COPY FIX + SILENT PRINTER)
+    // 12. RECEIPT RENDERING & PRINTING (TOP-LEFT ANCHORED + WARRANTY DATE FIX)
     // =========================================================================
     function applyReceiptPlaceholders(text, order) {
       const branch = (db.branches || []).find(b => b.id === order.branchId) || (db.branches || [])[0] || {};
       const total = getOrderTotal(order);
-      const warrantyUntil = getWarrantyUntilDate(order) || '—';
+      const wDays = Math.max(0, Number(order.warrantyDays ?? db.defaultWarrantyDays ?? 0) || 0);
+      let warrantyUntil = getWarrantyUntilDate(order);
+      if (!warrantyUntil && wDays > 0) {
+        const baseDate = normalizeDateToIso(order.issuedDate) || getTodayPrefix();
+        warrantyUntil = addDaysToIsoDate(baseDate, wDays);
+      }
       return String(text || '')
         .replace(/\{order_id\}/g, order.id || '')
         .replace(/\{company_name\}/g, db.companyName || '')
@@ -2408,8 +2404,8 @@
         .replace(/\{device\}/g, order.device || '')
         .replace(/\{serial\}/g, order.serial || '—')
         .replace(/\{total\}/g, formatMoney(total))
-        .replace(/\{warranty_days\}/g, String(order.warrantyDays || 0))
-        .replace(/\{warranty_until\}/g, warrantyUntil)
+        .replace(/\{warranty_days\}/g, String(wDays))
+        .replace(/\{warranty_until\}/g, warrantyUntil || '—')
         .replace(/\{date\}/g, getTodayPrefix());
     }
 
@@ -2503,6 +2499,7 @@
       if (tpl.paperFormat === 'a4') {
         pageSizeCss = isLandscape ? 'A4 landscape' : 'A4 portrait';
       } else if (useA4Sheet) {
+        // Full A4 sheet avoids Chromium auto-centering a smaller @page box in the middle of the paper
         pageSizeCss = 'A4 portrait';
         printLandscape = false;
       }
@@ -3744,6 +3741,25 @@
       showToast('Скрипт BUILD_WINDOWS_EXE.bat завантажено!');
     }
 
+    function syncPaperSettingsAcrossTemplates(sourceType) {
+      ensureReceiptTemplates();
+      const targetType = sourceType === 'intake' ? 'issue' : 'intake';
+      const src = db.receiptTemplates[sourceType];
+      const dst = db.receiptTemplates[targetType];
+      dst.printerName = src.printerName;
+      dst.paperFormat = src.paperFormat;
+      dst.orientation = src.orientation;
+      dst.fitToA4Top = src.fitToA4Top;
+      dst.offsetTopMm = src.offsetTopMm;
+      dst.customWidthMm = src.customWidthMm;
+      dst.customHeightMm = src.customHeightMm;
+      dst.marginMm = src.marginMm;
+      dst.fontSizePt = src.fontSizePt;
+      dst.copiesPerPage = src.copiesPerPage;
+      saveDB();
+      showToast(`Параметри паперу та принтера скопійовано у «${targetType === 'intake' ? 'Квитанцію прийому' : 'Квитанцію видачі'}»!`);
+    }
+
     function openReceiptEditorModal(type) {
       ensureReceiptTemplates();
       const tpl = db.receiptTemplates[type];
@@ -3793,11 +3809,22 @@
           ` : ''}
 
           ${(tpl.paperFormat === 'a5' || tpl.paperFormat === 'a6') ? `
-            <label class="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-teal-50/70 border border-teal-200 text-teal-900 cursor-pointer">
-              <input type="checkbox" ${tpl.fitToA4Top !== false ? 'checked' : ''} onchange="db.receiptTemplates['${type}'].fitToA4Top=this.checked; saveDB();" />
-              <span>У принтері лежить звичайний аркуш A4 (притискати квитанцію до верхнього лівого кута без центрування)</span>
-            </label>
-          ` : ''}
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-3 py-2 rounded-xl bg-teal-50/70 border border-teal-200 text-teal-900">
+              <label class="inline-flex items-center gap-2 cursor-pointer">
+                <input type="checkbox" ${tpl.fitToA4Top !== false ? 'checked' : ''} onchange="db.receiptTemplates['${type}'].fitToA4Top=this.checked; saveDB();" />
+                <span>У принтері лежить звичайний аркуш A4 (притискати квитанцію до верхнього лівого кута без центрування)</span>
+              </label>
+              <button type="button" onclick="syncPaperSettingsAcrossTemplates('${type}')" class="px-2.5 py-1 rounded-lg bg-[#1c6457] hover:bg-[#154e44] text-white font-semibold shrink-0">
+                ⇄ Застосувати формат до обох квитанцій
+              </button>
+            </div>
+          ` : `
+            <div class="flex justify-end">
+              <button type="button" onclick="syncPaperSettingsAcrossTemplates('${type}')" class="px-3 py-1.5 rounded-lg bg-teal-50 border border-teal-200 text-teal-900 font-semibold">
+                ⇄ Застосувати формат паперу та принтер до обох квитанцій
+              </button>
+            </div>
+          `}
 
           <div class="grid grid-cols-1 sm:grid-cols-4 gap-3">
             <div>
