@@ -54,8 +54,9 @@
       }
       #print-area {
         display: block !important;
-        position: static !important;
-        width: 100% !important;
+        position: absolute !important;
+        top: 0 !important;
+        left: 0 !important;
         margin: 0 !important;
         padding: 0 !important;
         background: #ffffff !important;
@@ -796,6 +797,8 @@
       return {
         intake: {
           paperFormat: 'a5',
+          fitToA4Top: true,
+          offsetTopMm: 0,
           customWidthMm: 148,
           customHeightMm: 210,
           marginMm: 8,
@@ -816,6 +819,8 @@
         },
         issue: {
           paperFormat: 'a5',
+          fitToA4Top: true,
+          offsetTopMm: 0,
           customWidthMm: 148,
           customHeightMm: 210,
           marginMm: 8,
@@ -1048,15 +1053,30 @@
       pendingHtml: null,
       pendingVersion: '',
 
+      normalizeUpdateUrl(rawUrl) {
+        let u = String(rawUrl || '').trim();
+        u = u.replace(/^https?:\/\/github\.com\/([^\/]+)\/([^\/]+)\/(?:blob|raw)\/(.+)$/i, 'https://raw.githubusercontent.com/$1/$2/$3');
+        const repoOnly = u.match(/^https?:\/\/github\.com\/([^\/]+)\/([^\/?#]+)\/?$/i);
+        if (repoOnly) {
+          u = `https://raw.githubusercontent.com/${repoOnly[1]}/${repoOnly[2]}/main/index.html`;
+        }
+        return u;
+      },
+
       async checkForUpdates(silent = false) {
-        const url = String(db.cloudUpdateUrl || '').trim();
+        let url = this.normalizeUpdateUrl(db.cloudUpdateUrl);
         if (!url) {
           if (!silent) showToast('Вкажіть URL оновлення у налаштуваннях!', 'error');
           return;
         }
         try {
           const sep = url.includes('?') ? '&' : '?';
-          const resp = await fetch(url + sep + '_t=' + Date.now(), { cache: 'no-store' });
+          let resp = await fetch(url + sep + '_t=' + Date.now(), { cache: 'no-store' });
+          if (!resp.ok && url.includes('/main/index.html')) {
+            const masterUrl = url.replace('/main/index.html', '/master/index.html');
+            const respMaster = await fetch(masterUrl + sep + '_t=' + Date.now(), { cache: 'no-store' });
+            if (respMaster.ok) resp = respMaster;
+          }
           if (!resp.ok) throw new Error('HTTP ' + resp.status);
           const text = await resp.text();
           let htmlContent = '';
@@ -2359,14 +2379,20 @@
       const tpl = db.receiptTemplates[type] || db.receiptTemplates.intake;
       const dims = getPaperDimensions(tpl);
       const copies = Number(tpl.copiesPerPage) === 2 ? 2 : 1;
+      const useA4Top = (tpl.paperFormat === 'a5' || tpl.paperFormat === 'a6') && tpl.fitToA4Top !== false;
+      const pageW = useA4Top ? 210 : dims.widthMm;
+      const pageH = useA4Top ? 297 : dims.heightMm;
+      const offsetTop = Number(tpl.offsetTopMm) || 0;
 
       const dynStyle = document.getElementById('dynamic-print-style');
       if (dynStyle) {
-        dynStyle.textContent = `@media print { @page { size: ${dims.widthMm}mm ${dims.heightMm}mm; margin: 0; } }`;
+        dynStyle.textContent = `@media print { @page { size: ${pageW}mm ${pageH}mm; margin: 0; } }`;
       }
 
       const printArea = document.getElementById('print-area');
       if (!printArea) return;
+      printArea.style.width = `${dims.widthMm}mm`;
+      printArea.style.marginTop = `${offsetTop}mm`;
       const singleHtml = renderSingleReceiptCopyHtml(order, type, tpl);
       printArea.innerHTML = copies === 2
         ? `${singleHtml}<div style="border-top:1px dashed #000; margin:2mm 0;"></div>${singleHtml}`
@@ -3150,8 +3176,8 @@
             <h2 class="text-sm font-bold text-gray-900">Оновлення програми та збірка Windows (.exe)</h2>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-3 items-end">
               <div>
-                <label class="block font-semibold mb-1">URL хмарного оновлення (посилання на index.html або version.json)</label>
-                <input id="set-cloud-url" value="${escapeHtml(db.cloudUpdateUrl || '')}" onchange="db.cloudUpdateUrl=this.value.trim(); saveDB();" placeholder="https://raw.githubusercontent.com/.../index.html" class="w-full rounded-xl border border-gray-200 px-3 py-2" />
+                <label class="block font-semibold mb-1">URL хмарного оновлення (посилання на index.html у GitHub)</label>
+                <input id="set-cloud-url" value="${escapeHtml(db.cloudUpdateUrl || '')}" onchange="db.cloudUpdateUrl=CloudUpdater.normalizeUpdateUrl(this.value); this.value=db.cloudUpdateUrl; saveDB(); if(FirebaseSync.connected) FirebaseSync.pushFullDB(true);" placeholder="https://raw.githubusercontent.com/ваше_імʼя/crm-update/main/index.html" class="w-full rounded-xl border border-gray-200 px-3 py-2" />
               </div>
               <div class="flex flex-wrap gap-2">
                 <button type="button" onclick="CloudUpdater.checkForUpdates(false)" class="px-3.5 py-2 rounded-xl bg-[#143430] text-white font-semibold">☁ Перевірити оновлення</button>
@@ -3632,10 +3658,21 @@
             </div>
           ` : ''}
 
-          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          ${(tpl.paperFormat === 'a5' || tpl.paperFormat === 'a6') ? `
+            <label class="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-teal-50/70 border border-teal-200 text-teal-900 cursor-pointer">
+              <input type="checkbox" ${tpl.fitToA4Top !== false ? 'checked' : ''} onchange="db.receiptTemplates['${type}'].fitToA4Top=this.checked; saveDB();" />
+              <span>Друкувати строго у верхній частині стандартного аркуша A4 (щоб не зʼїжджало вниз)</span>
+            </label>
+          ` : ''}
+
+          <div class="grid grid-cols-1 sm:grid-cols-4 gap-3">
             <div>
-              <label class="block font-semibold mb-1">Відступи (мм)</label>
+              <label class="block font-semibold mb-1">Поля квитанції (мм)</label>
               <input type="number" min="0" max="40" value="${tpl.marginMm}" onchange="db.receiptTemplates['${type}'].marginMm=Number(this.value); saveDB();" class="w-full rounded-xl border border-gray-200 px-3 py-1.5" />
+            </div>
+            <div>
+              <label class="block font-semibold mb-1">Зсув зверху (мм)</label>
+              <input type="number" min="-30" max="150" value="${Number(tpl.offsetTopMm) || 0}" onchange="db.receiptTemplates['${type}'].offsetTopMm=Number(this.value); saveDB();" class="w-full rounded-xl border border-gray-200 px-3 py-1.5" />
             </div>
             <div>
               <label class="block font-semibold mb-1">Розмір шрифту (pt)</label>
@@ -3908,6 +3945,13 @@
             delete db.adminPasswordHash;
           }
           if (meta.defaultWarrantyDays) db.defaultWarrantyDays = Number(meta.defaultWarrantyDays) || 30;
+          if (meta.cloudUpdateUrl !== undefined) {
+            const prevUrl = db.cloudUpdateUrl || '';
+            db.cloudUpdateUrl = String(meta.cloudUpdateUrl || '');
+            if (db.cloudUpdateUrl && db.cloudUpdateUrl !== prevUrl && db.cloudAutoCheck !== false) {
+              setTimeout(() => CloudUpdater.checkForUpdates(true), 1500);
+            }
+          }
           if (meta.receiptTemplates && typeof meta.receiptTemplates === 'object') {
             db.receiptTemplates = { ...db.receiptTemplates, ...meta.receiptTemplates };
           }
@@ -4018,6 +4062,7 @@
               companyName: db.companyName || '',
               directorPasswordHash: unifiedPassHash,
               defaultWarrantyDays: Number(db.defaultWarrantyDays) || 30,
+              cloudUpdateUrl: db.cloudUpdateUrl || '',
               receiptTemplates: db.receiptTemplates || {},
               updatedAt: Date.now()
             },
