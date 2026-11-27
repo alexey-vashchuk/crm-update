@@ -376,7 +376,7 @@
   </div>
 
   <!-- MODAL CONTAINER -->
-  <div id="modal-root" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/50 backdrop-blur-[1px] p-4 overflow-y-auto">
+  <div id="modal-root" class="fixed inset-0 z-50 hidden items-center justify-center bg-black/50 p-4 overflow-y-auto">
     <div id="modal-box" class="bg-white rounded-2xl shadow-xl border border-gray-100 w-full max-w-2xl overflow-hidden my-auto transform transition-all">
       <!-- Modal content injected here -->
     </div>
@@ -386,7 +386,7 @@
     // =========================================================================
     // 0. APPLICATION VERSION & CLOUD UPDATE METADATA
     // =========================================================================
-    const APP_VERSION = '2.2.5';
+    const APP_VERSION = '2.2.6';
     const APP_BUILD_DATE = '2026-11-27';
     const STORAGE_KEY = 'sc_crm_db_v2';
 
@@ -552,12 +552,12 @@
     let ordersMasterFilter = 'all';
     let ordersSortField = 'id';
     let ordersSortDir = 'desc';
-    let ordersPageLimit = 100;
+    let ordersPageLimit = 50;
 
     let clientsSearch = '';
-    let clientsPageLimit = 100;
+    let clientsPageLimit = 50;
     let partsSearch = '';
-    let partsPageLimit = 100;
+    let partsPageLimit = 50;
 
     const STATUS_META = {
       new: { labelKey: 'statusNew', badge: 'bg-sky-50 text-sky-700 border-sky-200' },
@@ -691,9 +691,11 @@
       return isFinite(n) ? n : 0;
     }
 
+    const moneyFormatter = new Intl.NumberFormat('uk-UA', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+    const orderCollator = new Intl.Collator('uk');
     function formatMoney(amount) {
       const n = parseMoneyNumber(amount);
-      return `${n.toLocaleString('uk-UA', { minimumFractionDigits: 0, maximumFractionDigits: 2 })} грн`;
+      return `${moneyFormatter.format(n)} грн`;
     }
 
     function getOrderTotal(order) {
@@ -996,65 +998,103 @@
     // =========================================================================
     const StorageEngine = {
       isElectron: Boolean(window.electronAPI && window.electronAPI.isElectron),
-      backupDir: '',
-      _lastSnapshotTs: 0,
-
+      backupDir: '', _lastSnapshotTs: 0, _timer: null, _dirty: false, _force: false, _saving: null, _idb: null,
+      async openCache() {
+        if (!this._idb) this._idb = new Promise((resolve, reject) => {
+          const req = indexedDB.open('sc_crm_cache_v1', 1);
+          req.onupgradeneeded = () => req.result.createObjectStore('snapshots');
+          req.onsuccess = () => resolve(req.result);
+          req.onerror = () => reject(req.error);
+        });
+        return this._idb;
+      },
+      async cacheGet(key = STORAGE_KEY) {
+        const cache = await this.openCache();
+        return new Promise((resolve, reject) => {
+          const req = cache.transaction('snapshots').objectStore('snapshots').get(key);
+          req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error);
+        });
+      },
+      async cachePut(value, key = STORAGE_KEY) {
+        const cache = await this.openCache();
+        return new Promise((resolve, reject) => {
+          const tx = cache.transaction('snapshots', 'readwrite');
+          tx.objectStore('snapshots').put(value, key);
+          tx.oncomplete = resolve; tx.onerror = tx.onabort = () => reject(tx.error);
+        });
+      },
       async init() {
+        let loaded = null;
         try {
           if (this.isElectron && window.electronAPI.loadDB) {
             const res = await window.electronAPI.loadDB();
-            if (res && res.backupDir) this.backupDir = res.backupDir;
-            if (res && res.ok && res.data && typeof res.data === 'object') {
-              db = { ...createEmptyDB(), ...res.data };
-              return;
-            }
+            if (res?.backupDir) this.backupDir = res.backupDir;
+            if (res?.ok && res.data) loaded = res.data;
+          } else {
+            loaded = await this.cacheGet();
           }
-        } catch (e) {
-          console.error('Electron loadDB error:', e);
-        }
-
+        } catch (e) { console.error('DB load:', e); }
         try {
-          const raw = localStorage.getItem(STORAGE_KEY);
-          if (raw) {
-            db = { ...createEmptyDB(), ...JSON.parse(raw) };
-            return;
+          const emergency = localStorage.getItem(STORAGE_KEY + '_emergency');
+          if (emergency) { loaded = JSON.parse(emergency); this._dirty = true; }
+          else if (!loaded) {
+            const raw = localStorage.getItem(STORAGE_KEY);
+            if (raw) loaded = JSON.parse(raw);
           }
-        } catch (e) {
-          console.error('localStorage load error:', e);
-        }
-
-        db = createEmptyDB();
+        } catch (e) { console.error('Local cache load:', e); }
+        db = { ...createEmptyDB(), ...(loaded || {}) };
       },
-
       shouldCreateSnapshot(force) {
         if (force) return true;
         const freq = db.backupFrequency || '15m';
         if (freq === 'manual') return false;
         if (freq === 'every_change') return true;
-        const now = Date.now();
-        const intervals = { '15m': 15 * 60 * 1000, '1h': 60 * 60 * 1000, 'daily': 24 * 60 * 60 * 1000 };
-        const wait = intervals[freq] || 15 * 60 * 1000;
-        if (now - this._lastSnapshotTs >= wait) {
-          this._lastSnapshotTs = now;
-          return true;
-        }
-        return false;
+        const intervals = { '15m': 900000, '1h': 3600000, daily: 86400000 };
+        return Date.now() - this._lastSnapshotTs >= (intervals[freq] || 900000);
       },
-
       save(forceSnapshot = false) {
-        try {
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
-        } catch (e) {
-          console.error('localStorage save error:', e);
-        }
-        if (this.isElectron && window.electronAPI.saveDB) {
-          const snap = this.shouldCreateSnapshot(forceSnapshot);
-          window.electronAPI.saveDB(db, snap).catch(err => console.error('Electron saveDB error:', err));
-        }
+        this._dirty = true; this._force ||= forceSnapshot;
+        clearTimeout(this._timer);
+        this._timer = setTimeout(() => this.flush(), forceSnapshot ? 0 : 250);
+      },
+      async flush() {
+        clearTimeout(this._timer);
+        if (this._saving) { await this._saving; if (this._dirty) return this.flush(); return true; }
+        if (!this._dirty) return true;
+        const force = this._force; this._dirty = false; this._force = false;
+        const snap = this.shouldCreateSnapshot(force);
+        this._saving = (async () => {
+          try {
+            if (this.isElectron && window.electronAPI.saveDB) {
+              const res = await window.electronAPI.saveDB(db, snap);
+              if (!res?.ok) throw new Error(res?.error || 'save-db failed');
+            } else {
+              try { await this.cachePut(db); }
+              catch (e) { localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); }
+            }
+            if (snap) this._lastSnapshotTs = Date.now();
+            if (!this._dirty) localStorage.removeItem(STORAGE_KEY + '_emergency');
+            return true;
+          } catch (e) {
+            console.error('DB save:', e); this._dirty = true; this._force ||= force;
+            showToast('Помилка локального збереження: ' + e.message, 'error');
+            return false;
+          }
+        })();
+        const ok = await this._saving; this._saving = null;
+        if (ok && this._dirty) { clearTimeout(this._timer); this._timer = setTimeout(() => this.flush(), 250); }
+        return ok;
+      },
+      emergencySave() {
+        if (!this._dirty && !this._saving) return;
+        try { localStorage.setItem(STORAGE_KEY + '_emergency', JSON.stringify(db)); }
+        catch (e) { console.error('Emergency save:', e); }
       }
     };
 
-    function saveDB(forceSnapshot = false) {
+    // Explicit mutation scopes keep the archive out of ordinary sync operations.
+    function saveDB(forceSnapshot = false, scopes = []) {
+      FirebaseSync.capture(scopes);
       StorageEngine.save(forceSnapshot);
       FirebaseSync.schedulePush();
     }
@@ -1148,6 +1188,8 @@
       async applyPendingUpdate() {
         if (!this.pendingHtml) return;
         if (StorageEngine.isElectron && window.electronAPI.applyHotUpdate) {
+          if (FirebaseSync.target() && !(await FirebaseSync.persistJournal())) return;
+          if (!(await StorageEngine.flush())) return;
           const res = await window.electronAPI.applyHotUpdate(this.pendingHtml);
           if (res && res.ok) {
             showToast(`Оновлено до v${this.pendingVersion}! Перезавантаження...`);
@@ -1173,6 +1215,8 @@
             showToast('Обраний файл не є коректним файлом CRM!', 'error');
             return;
           }
+          if (FirebaseSync.target() && !(await FirebaseSync.persistJournal())) return;
+          if (!(await StorageEngine.flush())) return;
           const res = await window.electronAPI.applyHotUpdate(html);
           if (res && res.ok) {
             showToast('Інтерфейс успішно оновлено! Перезавантаження...');
@@ -1220,7 +1264,9 @@
       const branchId = 'br_' + Date.now();
       const dirId = 'emp_' + Date.now();
 
+      const initialFirebaseConfig = db.firebaseConfig;
       db = createEmptyDB();
+      db.firebaseConfig = initialFirebaseConfig;
       db.initialized = true;
       db.companyName = companyName;
       db.directorPasswordHash = hashPassword(pass1);
@@ -1234,7 +1280,7 @@
       }];
       db.currentUserId = dirId;
 
-      saveDB(true);
+      saveDB(true, '*');
       document.getElementById('setup-screen')?.classList.add('hidden');
       refreshShellUI();
       renderWorkspace();
@@ -1402,13 +1448,23 @@
         .trim();
     }
 
-    function searchTextMatches(query, fields) {
-      const normalizedQuery = normalizeSearchText(query);
-      if (!normalizedQuery) return true;
-      const values = (Array.isArray(fields) ? fields : [fields]).filter(v => v != null).map(v => String(v));
-      const text = normalizeSearchText(values.join(' '));
-      const digits = values.join('').replace(/\D/g, '');
-      const terms = normalizedQuery.split(/\s+/).filter(Boolean);
+    let searchCache = new WeakMap();
+    let queryCache = new Map();
+    function searchTextMatches(query, fields, entity) {
+      let terms = queryCache.get(query);
+      if (!terms) {
+        terms = normalizeSearchText(query).split(/\s+/).filter(Boolean);
+        if (queryCache.size > 64) queryCache.clear();
+        queryCache.set(query, terms);
+      }
+      if (!terms.length) return true;
+      let entry = entity && searchCache.get(entity);
+      if (!entry) {
+        const values = (Array.isArray(fields) ? fields : [fields]).filter(v => v != null).map(String);
+        entry = { text: normalizeSearchText(values.join(' ')), digits: values.join('').replace(/\D/g, '') };
+        if (entity) searchCache.set(entity, entry);
+      }
+      const {text, digits} = entry;
       return terms.every(term => text.includes(term) || (/^\d+$/.test(term) && digits.includes(term)));
     }
 
@@ -1438,22 +1494,46 @@
       if (nextList) nextList.scrollTop = listScrollTop;
     }
 
+    let searchRenderTimer = null;
+    function scheduleSearchRender(view, id) {
+      clearTimeout(searchRenderTimer);
+      searchRenderTimer = setTimeout(() => {
+        if (currentView !== view) return;
+        if (document.activeElement?.id === id) renderWorkspacePreservingInput(id);
+        else renderWorkspaceKeepingScroll();
+      }, 250);
+    }
+
+    function renderWorkspaceKeepingScroll() {
+      const ws = document.getElementById('workspace');
+      const top = ws?.scrollTop || 0;
+      const old = ws?.querySelector('.orders-list-scroll');
+      const y = old?.scrollTop || 0, x = old?.scrollLeft || 0;
+      const id = document.activeElement?.id;
+      if (['orders-search-input','clients-search-input','parts-search-input'].includes(id)) {
+        renderWorkspacePreservingInput(id);
+      } else renderWorkspace();
+      if (ws) ws.scrollTop = top;
+      const list = ws?.querySelector('.orders-list-scroll');
+      if (list) { list.scrollTop = y; list.scrollLeft = x; }
+    }
+
     function handleOrdersSearchInput(input) {
       ordersSearch = input.value;
-      ordersPageLimit = 100;
-      renderWorkspacePreservingInput('orders-search-input');
+      ordersPageLimit = 50;
+      scheduleSearchRender('orders', 'orders-search-input');
     }
 
     function handleClientsSearchInput(input) {
       clientsSearch = input.value;
-      clientsPageLimit = 100;
-      renderWorkspacePreservingInput('clients-search-input');
+      clientsPageLimit = 50;
+      scheduleSearchRender('clients', 'clients-search-input');
     }
 
     function handlePartsSearchInput(input) {
       partsSearch = input.value;
-      partsPageLimit = 100;
-      renderWorkspacePreservingInput('parts-search-input');
+      partsPageLimit = 50;
+      scheduleSearchRender('warehouse', 'parts-search-input');
     }
 
     function renderWorkspace() {
@@ -1472,23 +1552,26 @@
     // =========================================================================
     // 9. ORDERS VIEW (TABS, ACCURATE WARRANTY/ARCHIVE SORTING, KPI, PAGINATION)
     // =========================================================================
+    let warrantyCache = new WeakMap();
     function getWarrantyUntilDate(order) {
       if (!order) return '';
+      if (warrantyCache.has(order)) return warrantyCache.get(order);
       const directIso = normalizeDateToIso(order.warrantyUntil ?? order.warrantyEnd ?? order.warrantyDate ?? '');
       const normIssued = normalizeDateToIso(order.issuedDate ?? order.issueDate ?? '');
       const wDays = Math.max(0, Number(order.warrantyDays ?? order.guaranteeDays ?? 0) || 0);
 
       if (normIssued && wDays > 0) {
-        return addDaysToIsoDate(normIssued, wDays);
+        const result = addDaysToIsoDate(normIssued, wDays);
+        warrantyCache.set(order, result); return result;
       }
-      return directIso;
+      warrantyCache.set(order, directIso); return directIso;
     }
 
-    function isOrderOnWarranty(order) {
+    function isOrderOnWarranty(order, today = getTodayPrefix()) {
       if (!order || order.status !== 'issued' || order.deleted) return false;
       const until = getWarrantyUntilDate(order);
       if (!until || !/^\d{4}-\d{2}-\d{2}$/.test(until)) return false;
-      return until >= getTodayPrefix();
+      return until >= today;
     }
 
     function toggleOrdersSort(field) {
@@ -1501,14 +1584,18 @@
       renderWorkspace();
     }
 
-    function renderOrdersView(ws) {
+    let ordersRevision = 0, orderSummaryCache = null, orderListCache = null, clientCountsCache = null;
+    function invalidateOrders() { ordersRevision++; orderSummaryCache = orderListCache = clientCountsCache = null; }
+    function getOrdersSummary() {
+      const today = getTodayPrefix();
+      const key = JSON.stringify([ordersRevision, currentBranchFilter, today]);
+      if (orderSummaryCache?.key === key) return orderSummaryCache;
       const branchFiltered = (db.orders || []).filter(o => {
         if (!o) return false;
         if (currentBranchFilter !== 'all' && o.branchId && o.branchId !== currentBranchFilter) return false;
         return true;
       });
 
-      const today = getTodayPrefix();
       let cntActive = 0, cntToday = 0, cntInWork = 0, cntWaiting = 0, cntForIssue = 0, cntWarranty = 0, cntArchive = 0, cntDeleted = 0;
 
       branchFiltered.forEach(o => {
@@ -1519,7 +1606,7 @@
         const createdIso = normalizeDateToIso(o.createdAt);
         if (createdIso === today || String(o.createdAt || '').startsWith(today)) cntToday++;
         if (o.status === 'issued') {
-          if (isOrderOnWarranty(o)) cntWarranty++;
+          if (isOrderOnWarranty(o, today)) cntWarranty++;
           else cntArchive++;
         } else if (o.status === 'ready' || o.status === 'cancelled' || o.status === 'no_repair') {
           cntForIssue++;
@@ -1530,16 +1617,24 @@
         }
       });
 
+      return orderSummaryCache = {key, today, branchFiltered, cntActive, cntToday, cntInWork, cntWaiting, cntForIssue, cntWarranty, cntArchive, cntDeleted};
+    }
+    function renderOrdersView(ws) {
+      const {key, today, branchFiltered, cntActive, cntToday, cntInWork, cntWaiting, cntForIssue, cntWarranty, cntArchive, cntDeleted} = getOrdersSummary();
       const q = ordersSearch.trim();
-      let tabList = branchFiltered.filter(o => {
+      const listKey = JSON.stringify([key, q, ordersTab, ordersStatusFilter, ordersMasterFilter, ordersSortField, ordersSortDir, isDirector()]);
+      let tabList;
+      if (orderListCache?.key === listKey) tabList = orderListCache.rows;
+      else {
+      tabList = branchFiltered.filter(o => {
         if (q) {
           return !o.deleted || isDirector();
         }
         if (ordersTab === 'deleted') return Boolean(o.deleted);
         if (o.deleted) return false;
         if (ordersTab === 'for_issue') return o.status === 'ready' || o.status === 'cancelled' || o.status === 'no_repair';
-        if (ordersTab === 'warranty') return o.status === 'issued' && isOrderOnWarranty(o);
-        if (ordersTab === 'archive') return o.status === 'issued' && !isOrderOnWarranty(o);
+        if (ordersTab === 'warranty') return o.status === 'issued' && isOrderOnWarranty(o, today);
+        if (ordersTab === 'archive') return o.status === 'issued' && !isOrderOnWarranty(o, today);
         return o.status !== 'issued' && o.status !== 'ready' && o.status !== 'cancelled' && o.status !== 'no_repair';
       });
 
@@ -1548,7 +1643,7 @@
           o.id, o.createdAt, o.clientName, o.clientPhone, String(o.clientPhone || '').replace(/\D/g, ''),
           o.device, o.serial, o.problem, o.completeness, o.description, o.masterName,
           ...(Array.isArray(o.works) ? o.works.map(w => w && (w.title || w.name)) : [])
-        ]));
+        ], o));
       }
       if (ordersStatusFilter !== 'all') {
         tabList = tabList.filter(o => o.status === ordersStatusFilter);
@@ -1561,13 +1656,13 @@
         let cmp = 0;
         if (ordersSortField === 'id') {
           const na = Number(a.id), nb = Number(b.id);
-          cmp = (!isNaN(na) && !isNaN(nb)) ? (na - nb) : String(a.id || '').localeCompare(String(b.id || ''), 'uk');
+          cmp = (!isNaN(na) && !isNaN(nb)) ? (na - nb) : orderCollator.compare(String(a.id || ''), String(b.id || ''));
         } else if (ordersSortField === 'device') {
-          cmp = String(a.device || '').localeCompare(String(b.device || ''), 'uk');
+          cmp = orderCollator.compare(String(a.device || ''), String(b.device || ''));
         } else if (ordersSortField === 'clientName') {
-          cmp = String(a.clientName || '').localeCompare(String(b.clientName || ''), 'uk');
+          cmp = orderCollator.compare(String(a.clientName || ''), String(b.clientName || ''));
         } else if (ordersSortField === 'status') {
-          cmp = String(a.status || '').localeCompare(String(b.status || ''), 'uk');
+          cmp = orderCollator.compare(String(a.status || ''), String(b.status || ''));
         } else if (ordersSortField === 'warrantyUntil') {
           const da = getWarrantyUntilDate(a) || normalizeDateToIso(a.issuedDate) || a.deadline || '';
           const dbDate = getWarrantyUntilDate(b) || normalizeDateToIso(b.issuedDate) || b.deadline || '';
@@ -1576,6 +1671,8 @@
         return ordersSortDir === 'asc' ? cmp : -cmp;
       });
 
+      orderListCache = {key:listKey,rows:tabList};
+      }
       const visibleOrders = tabList.slice(0, ordersPageLimit);
       const sortArrow = (f) => ordersSortField === f ? (ordersSortDir === 'asc' ? ' ↑' : ' ↓') : '';
 
@@ -1624,7 +1721,7 @@
               { id: 'archive', label: t('tabArchive'), count: cntArchive },
               ...(isDirector() ? [{ id: 'deleted', label: t('tabDeleted'), count: cntDeleted }] : [])
             ].map(tab => `
-              <button onclick="ordersTab='${tab.id}'; ordersSearch=''; ordersPageLimit=100; renderWorkspace();" class="px-3.5 py-2 rounded-xl text-xs font-semibold transition-colors inline-flex items-center gap-1.5 ${ordersTab === tab.id ? 'bg-[#143430] text-white' : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'}">
+              <button onclick="ordersTab='${tab.id}'; ordersSearch=''; ordersPageLimit=50; renderWorkspace();" class="px-3.5 py-2 rounded-xl text-xs font-semibold transition-colors inline-flex items-center gap-1.5 ${ordersTab === tab.id ? 'bg-[#143430] text-white' : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'}">
                 <span>${escapeHtml(tab.label)}</span>
                 <span class="px-1.5 py-0.5 rounded-md text-[10px] ${ordersTab === tab.id ? 'bg-[#245952] text-[#4fd1b5]' : 'bg-gray-100 text-gray-600'}">${tab.count}</span>
               </button>
@@ -1635,7 +1732,7 @@
           <div class="orders-fixed-block bg-white p-3.5 rounded-2xl border border-gray-100 shadow-2xs flex flex-col md:flex-row gap-2.5">
             <div class="flex-1 relative flex items-center">
               <input id="orders-search-input" value="${escapeHtml(ordersSearch)}" oninput="handleOrdersSearchInput(this)" placeholder="${escapeHtml(t('searchPlaceholder'))}" class="w-full rounded-xl border border-gray-200 px-3.5 ${q ? 'pr-8' : ''} py-2 text-xs focus:outline-none focus:border-[#1c6457]" />
-              ${q ? `<button type="button" onclick="ordersSearch=''; ordersPageLimit=100; renderWorkspace();" title="Очистити пошук" class="absolute right-2.5 text-gray-400 hover:text-gray-700 font-bold text-xs">✕</button>` : ''}
+              ${q ? `<button type="button" onclick="ordersSearch=''; ordersPageLimit=50; renderWorkspace();" title="Очистити пошук" class="absolute right-2.5 text-gray-400 hover:text-gray-700 font-bold text-xs">✕</button>` : ''}
             </div>
             <select onchange="ordersStatusFilter=this.value; renderWorkspace();" class="rounded-xl border border-gray-200 px-3 py-2 text-xs bg-white">
               <option value="all">Усі статуси</option>
@@ -1669,7 +1766,7 @@
             </table>
             ${tabList.length > ordersPageLimit ? `
               <div class="p-3 border-t border-gray-100 text-center">
-                <button onclick="ordersPageLimit += 100; renderWorkspace();" class="px-4 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 text-xs font-semibold text-gray-700">
+                <button onclick="ordersPageLimit += 50; renderWorkspace();" class="px-4 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 text-xs font-semibold text-gray-700">
                   Показати ще (показано ${visibleOrders.length} із ${tabList.length})
                 </button>
               </div>
@@ -1947,7 +2044,7 @@
         });
       }
 
-      saveDB();
+      saveDB(false, [['orders', newOrderId], ...(!existingClient ? [['clients', db.clients[0].id]] : [])]);
       closeModal();
       ordersTab = 'active';
       renderWorkspace();
@@ -2146,7 +2243,7 @@
       const order = (db.orders || []).find(o => String(o.id) === String(orderId));
       if (!order) return;
       order.estimatedPrice = Math.max(0, Number(val) || 0);
-      saveDB();
+      saveDB(false, [['orders', orderId]]);
       renderWorkspace();
       openOrderModal(orderId);
     }
@@ -2158,7 +2255,7 @@
       if (est <= 0) return;
       if (!Array.isArray(order.works)) order.works = toArrayFromFirebase(order.works);
       order.works.push({ title: 'Виконані роботи', price: est, type: 'work' });
-      saveDB();
+      saveDB(false, [['orders', orderId]]);
       renderWorkspace();
       openOrderModal(orderId);
       showToast(`Орієнтовну суму (${formatMoney(est)}) додано до підсумку!`);
@@ -2177,7 +2274,7 @@
           updated++;
         }
       });
-      saveDB(true);
+      saveDB(true, [['orders']]);
       renderWorkspace();
       showToast(`Оновлено ремонтів: ${updated}`);
     }
@@ -2193,7 +2290,7 @@
         order.warrantyDays = wDays;
         order.warrantyUntil = wDays > 0 ? addDaysToIsoDate(normIssued, wDays) : '';
       }
-      saveDB();
+      saveDB(false, [['orders', orderId]]);
       renderWorkspace();
       openOrderModal(orderId);
     }
@@ -2204,7 +2301,7 @@
       const emp = (db.employees || []).find(e => String(e.id) === String(masterId));
       order.masterId = emp ? emp.id : '';
       order.masterName = emp ? emp.name : '';
-      saveDB();
+      saveDB(false, [['orders', orderId]]);
       renderWorkspace();
     }
 
@@ -2215,7 +2312,7 @@
       if (order.approved && order.status !== 'issued' && order.status !== 'ready') {
         order.status = 'in_work';
       }
-      saveDB();
+      saveDB(false, [['orders', orderId]]);
       renderWorkspace();
       openOrderModal(orderId);
     }
@@ -2224,7 +2321,7 @@
       const order = (db.orders || []).find(o => String(o.id) === String(orderId));
       if (!order) return;
       order.description = val;
-      saveDB();
+      saveDB(false, [['orders', orderId]]);
     }
 
     function updateOrderWarrantyDays(orderId, daysVal) {
@@ -2237,7 +2334,7 @@
         order.issuedDate = normIssued;
         order.warrantyUntil = d > 0 ? addDaysToIsoDate(normIssued, d) : '';
       }
-      saveDB();
+      saveDB(false, [['orders', orderId]]);
       renderWorkspace();
       openOrderModal(orderId);
     }
@@ -2249,7 +2346,7 @@
       order.issuedDate = norm;
       const d = Math.max(0, Number(order.warrantyDays) || 0);
       order.warrantyUntil = d > 0 ? addDaysToIsoDate(norm, d) : '';
-      saveDB();
+      saveDB(false, [['orders', orderId]]);
       renderWorkspace();
       openOrderModal(orderId);
     }
@@ -2263,7 +2360,7 @@
       const wDays = Math.max(0, Number(order.warrantyDays ?? db.defaultWarrantyDays ?? 30));
       order.warrantyDays = wDays;
       order.warrantyUntil = wDays > 0 ? addDaysToIsoDate(order.issuedDate, wDays) : '';
-      saveDB();
+      saveDB(false, [['orders', orderId]]);
       closeModal();
       ordersTab = wDays > 0 ? 'warranty' : 'archive';
       renderWorkspace();
@@ -2279,7 +2376,7 @@
       if (!title) return;
       if (!Array.isArray(order.works)) order.works = toArrayFromFirebase(order.works);
       order.works.push({ title, price, type: 'work' });
-      saveDB();
+      saveDB(false, [['orders', orderId]]);
       renderWorkspace();
       openOrderModal(orderId);
     }
@@ -2293,7 +2390,7 @@
         const part = (db.parts || []).find(p => p.id === removed.partId);
         if (part) part.qty = (Number(part.qty) || 0) + 1;
       }
-      saveDB();
+      saveDB(false, [['orders', orderId], ['parts', removed?.partId || '__none__']]);
       renderWorkspace();
       openOrderModal(orderId);
     }
@@ -2338,7 +2435,7 @@
         type: 'part',
         partId: part.id
       });
-      saveDB();
+      saveDB(false, [['orders', orderId], ['parts', partId]]);
       renderWorkspace();
       openOrderModal(orderId);
       showToast(`Запчастину «${part.name}» списано в ремонт`);
@@ -2378,7 +2475,7 @@
         deleted: false
       };
       db.orders.unshift(copy);
-      saveDB();
+      saveDB(false, [['orders', newId]]);
       ordersTab = 'active';
       renderWorkspace();
       openOrderModal(newId);
@@ -2390,7 +2487,7 @@
       const order = (db.orders || []).find(o => String(o.id) === String(orderId));
       if (!order) return;
       order.deleted = true;
-      saveDB();
+      saveDB(false, [['orders', orderId]]);
       closeModal();
       renderWorkspace();
       showToast(`Замовлення #${order.id} переміщено у вкладку «Видалено»`);
@@ -2401,7 +2498,7 @@
       const order = (db.orders || []).find(o => String(o.id) === String(orderId));
       if (!order) return;
       order.deleted = false;
-      saveDB();
+      saveDB(false, [['orders', orderId]]);
       closeModal();
       renderWorkspace();
       showToast(`Замовлення #${order.id} відновлено`);
@@ -2410,7 +2507,7 @@
     function permanentDeleteOrder(orderId) {
       if (!requireDirectorAccess()) return;
       db.orders = (db.orders || []).filter(o => String(o.id) !== String(orderId));
-      saveDB();
+      saveDB(false, [['orders', orderId]]);
       closeModal();
       renderWorkspace();
       showToast(`Замовлення #${orderId} видалено остаточно`);
@@ -2569,7 +2666,8 @@
     // =========================================================================
     // 13. CLIENTS VIEW (FAST O(N+M) INDEX + CLIENT HISTORY CARD)
     // =========================================================================
-    function renderClientsView(ws) {
+    function getClientCounts() {
+      if (clientCountsCache) return clientCountsCache;
       const countsByPhone = new Map();
       const countsByName = new Map();
       (db.orders || []).forEach(o => {
@@ -2580,10 +2678,14 @@
         if (n) countsByName.set(n, (countsByName.get(n) || 0) + 1);
       });
 
+      return clientCountsCache = {countsByPhone,countsByName};
+    }
+    function renderClientsView(ws) {
+      const {countsByPhone,countsByName} = getClientCounts();
       const q = clientsSearch.trim();
       const filtered = (db.clients || []).filter(c => !q || searchTextMatches(q, [
         c.name, c.phone, String(c.phone || '').replace(/\D/g, ''), c.notes
-      ]));
+      ], c));
       const visible = filtered.slice(0, clientsPageLimit);
 
       ws.innerHTML = `
@@ -2634,7 +2736,7 @@
             </table>
             ${filtered.length > clientsPageLimit ? `
               <div class="p-3 border-t border-gray-100 text-center">
-                <button onclick="clientsPageLimit += 100; renderWorkspace();" class="px-4 py-2 rounded-xl bg-gray-100 text-xs font-semibold">Показати ще (${visible.length} із ${filtered.length})</button>
+                <button onclick="clientsPageLimit += 50; renderWorkspace();" class="px-4 py-2 rounded-xl bg-gray-100 text-xs font-semibold">Показати ще (${visible.length} із ${filtered.length})</button>
               </div>
             ` : ''}
           </div>
@@ -2711,7 +2813,7 @@
       client.name = document.getElementById('cc-name').value.trim();
       client.phone = formatPhoneUa(document.getElementById('cc-phone').value);
       client.notes = document.getElementById('cc-notes').value.trim();
-      saveDB();
+      saveDB(false, [['clients', clientId]]);
       renderWorkspace();
       showToast('Дані клієнта збережено');
     }
@@ -2754,7 +2856,7 @@
         notes: document.getElementById('ac-notes').value.trim(),
         createdAt: getTodayPrefix()
       });
-      saveDB();
+      saveDB(false, [['clients', db.clients[0].id]]);
       closeModal();
       renderWorkspace();
       showToast('Клієнта додано');
@@ -2765,7 +2867,7 @@
     // =========================================================================
     function renderWarehouseView(ws) {
       const q = partsSearch.trim();
-      const filtered = (db.parts || []).filter(p => !q || searchTextMatches(q, [p.name, p.sku, p.qty]));
+      const filtered = (db.parts || []).filter(p => !q || searchTextMatches(q, [p.name, p.sku, p.qty], p));
       const visible = filtered.slice(0, partsPageLimit);
 
       ws.innerHTML = `
@@ -2815,7 +2917,7 @@
             </table>
             ${filtered.length > partsPageLimit ? `
               <div class="p-3 border-t border-gray-100 text-center">
-                <button onclick="partsPageLimit += 100; renderWorkspace();" class="px-4 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 text-xs font-semibold text-gray-700">
+                <button onclick="partsPageLimit += 50; renderWorkspace();" class="px-4 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 text-xs font-semibold text-gray-700">
                   Показати ще (показано ${visible.length} із ${filtered.length})
                 </button>
               </div>
@@ -2876,7 +2978,7 @@
         buyPrice: Number(document.getElementById('ap-buy').value) || 0,
         sellPrice: Number(document.getElementById('ap-sell').value) || 0
       });
-      saveDB();
+      saveDB(false, [['parts', db.parts[0].id]]);
       closeModal();
       renderWorkspace();
       showToast('Запчастину додано на склад');
@@ -2886,14 +2988,14 @@
       const part = (db.parts || []).find(p => p.id === partId);
       if (!part) return;
       part.qty = Math.max(0, (Number(part.qty) || 0) + delta);
-      saveDB();
+      saveDB(false, [['parts', partId]]);
       renderWorkspace();
     }
 
     function deletePart(partId) {
       if (!requireDirectorAccess()) return;
       db.parts = (db.parts || []).filter(p => p.id !== partId);
-      saveDB();
+      saveDB(false, [['parts', partId]]);
       renderWorkspace();
       showToast('Запчастину видалено');
     }
@@ -3106,7 +3208,7 @@
       db.companyName = document.getElementById('cmp-name').value.trim();
       db.companyPhone = document.getElementById('cmp-phone').value.trim();
       db.companyAddress = document.getElementById('cmp-address').value.trim();
-      saveDB();
+      saveDB(false, [['meta']]);
       refreshShellUI();
       showToast('Реквізити компанії збережено');
     }
@@ -3119,13 +3221,13 @@
       db.directorPasswordHash = hashPassword(p);
       delete db.masterPasswordHash;
       delete db.adminPasswordHash;
-      saveDB(true);
+      saveDB(true, [['meta']]);
       if (FirebaseSync.connected) {
-        await FirebaseSync.pushFullDB(true);
+        FirebaseSync.flush();
       }
       document.getElementById('new-dir-pass').value = '';
       renderWorkspace();
-      showToast('Майстер-пароль Директора оновлено та синхронізовано');
+      showToast('Майстер-пароль Директора оновлено');
     }
 
     function addBranch(e) {
@@ -3134,7 +3236,7 @@
       const name = document.getElementById('new-branch-name').value.trim();
       if (!name) return;
       db.branches.push({ id: 'br_' + Date.now(), name });
-      saveDB();
+      saveDB(false, [['branches', db.branches.at(-1).id]]);
       refreshShellUI();
       renderWorkspace();
       showToast('Філію додано');
@@ -3143,7 +3245,7 @@
     function deleteBranch(branchId) {
       if (!requireDirectorAccess()) return;
       db.branches = (db.branches || []).filter(b => b.id !== branchId);
-      saveDB();
+      saveDB(false, [['branches', branchId]]);
       refreshShellUI();
       renderWorkspace();
     }
@@ -3219,7 +3321,7 @@
           salaryValue
         });
       }
-      saveDB();
+      saveDB(false, [['employees', empId || db.employees.at(-1).id]]);
       closeModal();
       renderWorkspace();
       showToast('Співробітника збережено');
@@ -3242,7 +3344,7 @@
         }
       }
       emp.active = nextState;
-      saveDB();
+      saveDB(false, [['employees', empId]]);
       renderWorkspace();
       showToast(nextState ? `Співробітника «${emp.name}» знову активовано` : `Співробітника «${emp.name}» вимкнено (історія збережена)`);
     }
@@ -3250,7 +3352,7 @@
     function deleteEmployee(empId) {
       if (!requireDirectorAccess()) return;
       db.employees = (db.employees || []).filter(e => e.id !== empId);
-      saveDB();
+      saveDB(false, [['employees', empId]]);
       renderWorkspace();
       showToast('Співробітника видалено');
     }
@@ -3322,7 +3424,7 @@
                     <option value="manual" ${db.backupFrequency === 'manual' ? 'selected' : ''}>Тільки вручну</option>
                   </select>
                 </div>
-                <button type="button" onclick="saveDB(true); showToast('Резервну копію створено!');" class="px-4 py-2 rounded-xl bg-[#1c6457] text-white font-semibold">Зробити бекап зараз</button>
+                <button type="button" onclick="StorageEngine.save(true); StorageEngine.flush().then(ok=>{if(ok) showToast('Резервну копію створено!');});" class="px-4 py-2 rounded-xl bg-[#1c6457] text-white font-semibold">Зробити бекап зараз</button>
               </div>
 
               <div class="pt-2 border-t border-gray-100 flex flex-wrap gap-2 items-center">
@@ -3343,7 +3445,7 @@
           <div class="bg-white p-5 rounded-2xl border border-gray-100 space-y-3">
             <div class="flex items-center justify-between">
               <h2 class="text-sm font-bold text-gray-900">Онлайн-база даних Firebase Realtime Database (жива синхронізація між ПК)</h2>
-              ${FirebaseSync.connected ? `<button type="button" onclick="FirebaseSync.disconnect()" class="text-red-600 font-semibold hover:underline">Відключити</button>` : ''}
+              ${db.firebaseConfig?.databaseURL ? `<button type="button" onclick="FirebaseSync.disconnect()" class="text-red-600 font-semibold hover:underline">Відключити</button>` : ''}
             </div>
             <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
               <div>
@@ -3372,7 +3474,7 @@
             <div class="grid grid-cols-1 md:grid-cols-2 gap-3 items-end">
               <div>
                 <label class="block font-semibold mb-1">URL хмарного оновлення (посилання на index.html у GitHub)</label>
-                <input id="set-cloud-url" value="${escapeHtml(db.cloudUpdateUrl || '')}" onchange="db.cloudUpdateUrl=CloudUpdater.normalizeUpdateUrl(this.value); this.value=db.cloudUpdateUrl; saveDB(); if(FirebaseSync.connected) FirebaseSync.pushFullDB(true);" placeholder="https://raw.githubusercontent.com/ваше_імʼя/crm-update/main/index.html" class="w-full rounded-xl border border-gray-200 px-3 py-2" />
+                <input id="set-cloud-url" value="${escapeHtml(db.cloudUpdateUrl || '')}" onchange="db.cloudUpdateUrl=CloudUpdater.normalizeUpdateUrl(this.value); this.value=db.cloudUpdateUrl; saveDB(false, [['meta']]);" placeholder="https://raw.githubusercontent.com/ваше_імʼя/crm-update/main/index.html" class="w-full rounded-xl border border-gray-200 px-3 py-2" />
               </div>
               <div class="flex flex-wrap gap-2">
                 <button type="button" onclick="CloudUpdater.checkForUpdates(false)" class="px-3.5 py-2 rounded-xl bg-[#143430] text-white font-semibold">☁ Перевірити оновлення</button>
@@ -3398,7 +3500,7 @@
     function saveDefaultWarrantyDays() {
       const val = Math.max(0, Number(document.getElementById('set-def-warranty')?.value) || 30);
       db.defaultWarrantyDays = val;
-      saveDB();
+      saveDB(false, [['meta']]);
       showToast('Гарантію за замовчуванням збережено: ' + val + ' дн.');
     }
 
@@ -3532,9 +3634,9 @@
 
       if (!activeEmp) return;
       db.currentUserId = activeEmp.id;
-      saveDB(true);
+      saveDB(true, [['employees', activeEmp.id]]);
       if (FirebaseSync.connected) {
-        await FirebaseSync.pushFullDB(true);
+        FirebaseSync.flush();
       }
       closeModal();
       refreshShellUI();
@@ -3625,9 +3727,9 @@
           delete db.masterPasswordHash;
           delete db.adminPasswordHash;
           db.currentUserId = pendingDirectorId;
-          saveDB(true);
+          saveDB(true, [['meta']]);
           if (FirebaseSync.connected) {
-            FirebaseSync.pushFullDB(true);
+            FirebaseSync.flush();
           }
           closeModal();
           refreshShellUI();
@@ -3642,6 +3744,8 @@
 
     async function rollbackManualHtmlUpdate() {
       if (!StorageEngine.isElectron || !window.electronAPI || !window.electronAPI.rollbackHotUpdate) return;
+      if (FirebaseSync.target() && !(await FirebaseSync.persistJournal())) return;
+      if (!(await StorageEngine.flush())) return;
       const res = await window.electronAPI.rollbackHotUpdate();
       if (res && res.ok) {
         showToast('Попередню версію відновлено! Перезавантаження...');
@@ -3676,7 +3780,8 @@
           appId: 'com.servicecenter.crm',
           productName: 'ServiceCenter CRM',
           win: {
-            target: 'portable'
+            target: 'portable',
+            icon: 'crm.ico'
           }
         }
       }, null, 2);
@@ -3692,6 +3797,14 @@
         "let mainWindow = null;",
         "let tray = null;",
         "let isQuitting = false;",
+        "let quitReady = false;",
+        "let flushInProgress = false;",
+        "let rendererFlushReady = false;",
+        "ipcMain.on('crm-flush-ready', () => { rendererFlushReady = true; });",
+        "let saveQueue = Promise.resolve();",
+        "let icon;",
+        "function getIcon() { return icon ||= nativeImage.createFromDataURL('data:image/png;base64,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'); }",
+        "function restoreWindow() { if (!mainWindow) return; if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.show(); mainWindow.focus(); }",
         "",
         "function getBaseDir() {",
         "  if (process.env.PORTABLE_EXECUTABLE_DIR) return process.env.PORTABLE_EXECUTABLE_DIR;",
@@ -3713,6 +3826,7 @@
         "    minWidth: 960,",
         "    minHeight: 640,",
         "    autoHideMenuBar: true,",
+        "    icon: getIcon(),",
         "    webPreferences: {",
         "      preload: path.join(__dirname, 'preload.js'),",
         "      contextIsolation: true,",
@@ -3722,9 +3836,11 @@
         "  });",
         "",
         "  const hotUi = path.join(getBaseDir(), 'app_ui.html');",
+        "  // Keep normal hot-update/rollback behavior. The user can replace app_ui.html with the new UI when rebuilding.",
         "  if (fs.existsSync(hotUi)) mainWindow.loadFile(hotUi);",
         "  else mainWindow.loadFile(path.join(__dirname, 'index.html'));",
         "",
+        "  mainWindow.webContents.on('did-start-loading', () => { rendererFlushReady = false; });",
         "  mainWindow.on('close', (e) => {",
         "    if (!isQuitting && tray) {",
         "      e.preventDefault();",
@@ -3744,45 +3860,61 @@
         "app.whenReady().then(() => {",
         "  createWindow();",
         "  try {",
-        "    const icon = nativeImage.createEmpty();",
-        "    tray = new Tray(icon);",
+        "    tray = new Tray(getIcon().resize({ width: 32, height: 32 }));",
         "    tray.setToolTip('ServiceCenter CRM');",
         "    tray.setContextMenu(Menu.buildFromTemplate([",
-        "      { label: 'Відкрити CRM', click: () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } } },",
+        "      { label: 'Відкрити CRM', click: restoreWindow },",
         "      { label: 'Вихід з програми', click: () => { isQuitting = true; app.quit(); } }",
         "    ]));",
-        "    tray.on('click', () => { if (mainWindow) { mainWindow.show(); mainWindow.focus(); } });",
-        "  } catch (e) {}",
+        "    tray.on('click', restoreWindow);",
+        "    tray.on('double-click', restoreWindow);",
+        "  } catch (e) { console.error('Tray initialization failed:', e); tray = null; }",
         "});",
         "",
-        "ipcMain.handle('load-db', () => {",
+        "const fsp = fs.promises;",
+        "async function atomicWrite(file, data) {",
+        "  const tmp = file + '.tmp';",
+        "  await fsp.writeFile(tmp, data, 'utf8');",
+        "  await fsp.rename(tmp, file);",
+        "}",
+        "ipcMain.handle('load-db', async () => {",
         "  try {",
         "    const backupDir = ensureBackupDir();",
-        "    const dbFile = path.join(backupDir, 'crm_db.json');",
-        "    if (fs.existsSync(dbFile)) {",
-        "      const raw = fs.readFileSync(dbFile, 'utf8');",
-        "      return { ok: true, backupDir, data: JSON.parse(raw) };",
-        "    }",
-        "    return { ok: true, backupDir, data: null };",
-        "  } catch (e) {",
-        "    return { ok: false, error: e.message };",
-        "  }",
+        "    try { return { ok: true, backupDir, data: JSON.parse(await fsp.readFile(path.join(backupDir, 'crm_db.json'), 'utf8')) }; }",
+        "    catch (e) { if (e.code === 'ENOENT') return { ok: true, backupDir, data: null }; throw e; }",
+        "  } catch (e) { return { ok: false, error: e.message }; }",
         "});",
-        "",
         "ipcMain.handle('save-db', (_e, dbObj, makeSnapshot) => {",
-        "  try {",
+        "  const job = saveQueue.then(async () => {",
         "    const backupDir = ensureBackupDir();",
-        "    const json = JSON.stringify(dbObj, null, 2);",
-        "    fs.writeFileSync(path.join(backupDir, 'crm_db.json'), json, 'utf8');",
+        "    const json = JSON.stringify(dbObj);",
+        "    await atomicWrite(path.join(backupDir, 'crm_db.json'), json);",
         "    if (makeSnapshot) {",
         "      const d = new Date();",
         "      const tag = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;",
-        "      fs.writeFileSync(path.join(backupDir, `backup_${tag}.json`), json, 'utf8');",
+        "      await atomicWrite(path.join(backupDir, `backup_${tag}.json`), json);",
         "    }",
         "    return { ok: true, backupDir };",
-        "  } catch (e) {",
-        "    return { ok: false, error: e.message };",
-        "  }",
+        "  });",
+        "  saveQueue = job.catch(e => console.error('DB save:', e));",
+        "  return job.catch(e => ({ ok: false, error: e.message }));",
+        "});",
+        "// Flush renderer and disk queue before a real exit (closing to tray still hides the window).",
+        "app.on('before-quit', (e) => {",
+        "  if (quitReady || !mainWindow || mainWindow.isDestroyed()) return;",
+        "  if (!rendererFlushReady) { e.preventDefault(); saveQueue.finally(() => { quitReady = true; isQuitting = true; app.quit(); }); return; }",
+        "  e.preventDefault();",
+        "  if (flushInProgress) return;",
+        "  flushInProgress = true;",
+        "  const finish = async (_event, ok) => {",
+        "    clearTimeout(timeout); ipcMain.removeListener('crm-flush-complete', finish);",
+        "    await saveQueue;",
+        "    if (!ok) { flushInProgress = false; isQuitting = false; restoreWindow(); return; }",
+        "    quitReady = true; isQuitting = true; app.quit();",
+        "  };",
+        "  const timeout = setTimeout(() => finish(null, false), 15000);",
+        "  ipcMain.once('crm-flush-complete', finish);",
+        "  mainWindow.webContents.send('crm-flush-request');",
         "});",
         "",
         "ipcMain.handle('apply-hot-update', (_e, html) => {",
@@ -3840,6 +3972,8 @@
         "  isElectron: true,",
         "  loadDB: () => ipcRenderer.invoke('load-db'),",
         "  saveDB: (dbObj, snap) => ipcRenderer.invoke('save-db', dbObj, snap),",
+        "  onFlushRequest: (callback) => { ipcRenderer.on('crm-flush-request', () => callback()); ipcRenderer.send('crm-flush-ready'); },",
+        "  flushComplete: (ok) => ipcRenderer.send('crm-flush-complete', !!ok),",
         "  applyHotUpdate: (html) => ipcRenderer.invoke('apply-hot-update', html),",
         "  rollbackHotUpdate: () => ipcRenderer.invoke('rollback-hot-update'),",
         "  getPrinters: () => ipcRenderer.invoke('get-printers'),",
@@ -3847,6 +3981,16 @@
         "});"
       ].join('\n');
 
+      // CMD.EXE limits a command line to 8191 characters. Encode each generated file in small chunks.
+      function writeBase64File(name, encoded) {
+        const tmp = name + '.b64.tmp';
+        const lines = ['type nul > "' + tmp + '"'];
+        for (let i = 0; i < encoded.length; i += 2800) lines.push('>>"' + tmp + '" echo ' + encoded.slice(i,i+2800));
+        lines.push('powershell -NoProfile -Command "[IO.File]::WriteAllBytes(\'' + name + '\', [Convert]::FromBase64String([IO.File]::ReadAllText(\'' + tmp + '\')))"');
+        lines.push('if errorlevel 1 exit /b 1');
+        lines.push('del /q "' + tmp + '"');
+        return lines;
+      }
       const batLines = [
         '@echo off',
         'chcp 65001 >nul',
@@ -3865,13 +4009,16 @@
         '  pause',
         '  exit /b 1',
         ')',
-        'powershell -NoProfile -Command "[IO.File]::WriteAllBytes(\'package.json\', [Convert]::FromBase64String(\'' + utf8ToBase64(pkgJsonStr) + '\'))"',
-        'powershell -NoProfile -Command "[IO.File]::WriteAllBytes(\'main.js\', [Convert]::FromBase64String(\'' + utf8ToBase64(mainJsStr) + '\'))"',
-        'powershell -NoProfile -Command "[IO.File]::WriteAllBytes(\'preload.js\', [Convert]::FromBase64String(\'' + utf8ToBase64(preloadJsStr) + '\'))"',
+        ...writeBase64File('package.json', utf8ToBase64(pkgJsonStr)),
+        ...writeBase64File('main.js', utf8ToBase64(mainJsStr)),
+        ...writeBase64File('preload.js', utf8ToBase64(preloadJsStr)),
+        ...writeBase64File('crm.ico', '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'),
         'echo [1/2] Vstanovlennya Electron ta electron-builder...',
         'call npm install',
+        'if errorlevel 1 exit /b 1',
         'echo [2/2] Zbirka portable .exe faylu...',
         'call npm run build',
+        'if errorlevel 1 exit /b 1',
         'echo =========================================================',
         'echo   GOTOVO! Fayl ServiceCenter CRM.exe u papci dist\\',
         'echo =========================================================',
@@ -4068,7 +4215,7 @@
       tpl.showSerial = document.getElementById('rt-s-serial').checked;
       tpl.showCompleteness = document.getElementById('rt-s-comp').checked;
       tpl.showMaster = document.getElementById('rt-s-master').checked;
-      saveDB();
+      saveDB(false, [['receiptTemplates']]);
       showToast('Шаблон квитанції збережено!');
     }
 
@@ -4085,7 +4232,7 @@
           widthMm: 30,
           opacity: 0.9
         });
-        saveDB();
+        saveDB(false, [['receiptTemplates']]);
         openReceiptEditorModal(tab);
       };
       reader.readAsDataURL(file);
@@ -4096,13 +4243,13 @@
       const img = db.receiptTemplates[tab].images[idx];
       if (!img) return;
       img[prop] = Number(val) || 0;
-      saveDB();
+      saveDB(false, [['receiptTemplates']]);
     }
 
     function removeReceiptImage(tab, idx) {
       ensureReceiptTemplates();
       db.receiptTemplates[tab].images.splice(idx, 1);
-      saveDB();
+      saveDB(false, [['receiptTemplates']]);
       openReceiptEditorModal(tab);
     }
 
@@ -4128,10 +4275,12 @@
         try {
           const parsed = JSON.parse(reader.result);
           if (!parsed || typeof parsed !== 'object') throw new Error('Невірний формат JSON');
-          db = { ...createEmptyDB(), ...parsed, initialized: true };
+          const targetConfig = db.firebaseConfig;
+          if (targetConfig?.databaseURL && !confirm('Імпорт змінить також підключену онлайн-базу. Продовжити?')) return;
+          db = { ...createEmptyDB(), ...parsed, firebaseConfig: targetConfig, initialized: true };
           normalizeAndMigrateDB();
           ensureReceiptTemplates();
-          saveDB(true);
+          saveDB(true, '*');
           refreshShellUI();
           renderWorkspace();
           showToast('Базу успішно імпортовано! Усі дати та суми автоматично перевірено.');
@@ -4142,10 +4291,12 @@
       reader.readAsText(file);
     }
 
-    function resetFullDatabase() {
+    async function resetFullDatabase() {
       if (!requireDirectorAccess()) return;
       if (!confirm('УВАГА! Це видалить усі замовлення, клієнтів і налаштування на цьому ПК. Продовжити?')) return;
+      if (db.firebaseConfig && !(await FirebaseSync.disconnect(true))) return;
       db = createEmptyDB();
+      FirebaseSync.resetBaseline(); invalidateOrders();
       localStorage.removeItem(STORAGE_KEY);
       StorageEngine.save(false);
       checkFirstRunSetup();
@@ -4155,252 +4306,420 @@
     // 20. REAL-TIME FIREBASE SYNC (STRUCTURED NODES + LIVE MULTI-PC SYNC)
     // =========================================================================
     const FirebaseSync = {
-      app: null,
-      database: null,
-      rootRef: null,
-      connected: false,
-      isApplyingRemote: false,
-      _pushTimer: null,
-      _lastPushedJson: '',
-      _lastStatusText: 'Не підключено',
-      _lastStatusColor: 'gray',
-
-      getBasePath() {
-        const raw = (db.firebaseConfig && db.firebaseConfig.path) ? String(db.firebaseConfig.path).trim() : 'crm_data';
-        return raw.replace(/^\/+|\/+$/g, '') || 'crm_data';
+      app: null, database: null, rootRef: null, connected: false, online: false,
+      _lastStatusText: 'Не підключено', _lastStatusColor: 'gray',
+      collections: ['branches', 'employees', 'orders', 'clients', 'parts'],
+      baseline: new Map(), keys: new Map(), pending: new Map(), listeners: [],
+      _pushTimer: null, _retryTimer: null, _renderTimer: null, _flight: null, _generation: 0,
+      _changed: new Set(), _connecting: false, _journalOK: true, _journalRev: 0, _journalWrite: Promise.resolve(true), _deferred: new Map(),
+      target(cfg = db.firebaseConfig) {
+        return cfg?.databaseURL ? String(cfg.databaseURL).trim().replace(/\/+$/, '') + '/' + String(cfg.path || 'crm_data').trim().replace(/^\/+|\/+$/g, '') : '';
       },
-
+      journalKey() { return STORAGE_KEY + '_outbox_' + encodeURIComponent(this.target()); },
       setStatus(text, color = 'gray') {
-        this._lastStatusText = text;
-        this._lastStatusColor = color;
+        if (this._lastStatusText === text && this._lastStatusColor === color) return;
+        this._lastStatusText = text; this._lastStatusColor = color;
         const badgeText = document.getElementById('storage-badge-text');
         const badgeDot = document.getElementById('storage-badge-dot');
         if (badgeText) badgeText.textContent = text;
-        if (badgeDot) {
-          const colors = {
-            green: 'bg-emerald-500',
-            amber: 'bg-amber-400 animate-pulse',
-            red: 'bg-red-500',
-            gray: 'bg-gray-400'
-          };
-          badgeDot.className = 'w-2 h-2 rounded-full ' + (colors[color] || colors.gray);
+        if (badgeDot) badgeDot.className = 'w-2 h-2 rounded-full ' + ({green:'bg-emerald-500',amber:'bg-amber-400',red:'bg-red-500',gray:'bg-gray-400'}[color] || 'bg-gray-400');
+        const diag = document.getElementById('fb-diag-status'); if (diag) diag.textContent = text;
+      },
+      status() {
+        if (!this._journalOK) return this.setStatus('Помилка локальної черги — зміни не надіслано', 'red');
+        if (this.pending.size) return this.setStatus((this.online ? 'Синхронізація: ' : 'Офлайн — у черзі: ') + this.pending.size, 'amber');
+        this.setStatus(this.online ? 'Хмара онлайн (жива синхронізація)' : 'Хмара офлайн — локальна робота', this.online ? 'green' : 'amber');
+      },
+      safeKey(id) { return String(id).replace(/[.#$\[\]\/]/g, '_'); },
+      recordKey(col, id) { return this.keys.get(col + '/' + String(id)) || this.safeKey(id); },
+      // Canonical Firebase values: null and empty containers represent absent nodes.
+      canonical(value) {
+        if (value === null || value === undefined) return null;
+        if (typeof value !== 'object') return value;
+        const out = {};
+        for (const key of Object.keys(value).sort()) {
+          const v = this.canonical(value[key]);
+          if (v !== null) out[key] = v;
         }
-        const diagBox = document.getElementById('fb-diag-status');
-        if (diagBox) diagBox.textContent = text;
+        return Object.keys(out).length ? out : null;
       },
-
+      same(a, b) { return JSON.stringify(a) === JSON.stringify(b); },
+      meta() {
+        return {initialized: Boolean(db.initialized), companyName: db.companyName || '', companyPhone: db.companyPhone || '', companyAddress: db.companyAddress || '', directorPasswordHash: db.directorPasswordHash || '', defaultWarrantyDays: Number(db.defaultWarrantyDays) || 30, cloudUpdateUrl: db.cloudUpdateUrl || ''};
+      },
       buildStructuredPayload() {
-        return {
-          meta: {
-            initialized: Boolean(db.initialized),
-            companyName: db.companyName || '',
-            companyPhone: db.companyPhone || '',
-            companyAddress: db.companyAddress || '',
-            directorPasswordHash: db.directorPasswordHash || '',
-            defaultWarrantyDays: Number(db.defaultWarrantyDays) || 30,
-            cloudUpdateUrl: db.cloudUpdateUrl || '',
-            updatedAt: Date.now()
-          },
-          branches: arrayToFirebaseMap(db.branches, 'br'),
-          employees: arrayToFirebaseMap(db.employees, 'emp'),
-          orders: arrayToFirebaseMap(db.orders, 'ord'),
-          clients: arrayToFirebaseMap(db.clients, 'cli'),
-          parts: arrayToFirebaseMap(db.parts, 'part'),
-          receiptTemplates: db.receiptTemplates || createDefaultReceiptTemplates()
-        };
+        const out = {meta: {...this.meta(), updatedAt: Date.now()}, receiptTemplates: db.receiptTemplates || createDefaultReceiptTemplates()};
+        for (const col of this.collections) {
+          out[col] = {};
+          for (const record of db[col] || []) if (record?.id != null) out[col][this.recordKey(col, record.id)] = record;
+        }
+        return out;
       },
-
-      applyRemoteSnapshot(val) {
-        if (!val || typeof val !== 'object') return false;
-        const meta = val.meta && typeof val.meta === 'object' ? val.meta : val;
-        const incomingOrders = toArrayFromFirebase(val.orders);
-        const incomingClients = toArrayFromFirebase(val.clients);
-        const incomingParts = toArrayFromFirebase(val.parts);
-        const incomingBranches = toArrayFromFirebase(val.branches);
-        const incomingEmployees = toArrayFromFirebase(val.employees);
-
-        const hasMeaningfulData = Boolean(
-          meta.companyName ||
-          incomingOrders.length > 0 ||
-          incomingClients.length > 0 ||
-          incomingEmployees.length > 0
-        );
-        if (!hasMeaningfulData) return false;
-
-        this.isApplyingRemote = true;
+      resetBaseline() {
+        this.baseline.clear();
+        for (const col of this.collections) for (const row of db[col] || []) {
+          if (row?.id != null) this.baseline.set(col + '/' + this.recordKey(col,row.id), this.canonical(row));
+        }
+        this.baseline.set('meta', this.canonical(this.meta()));
+        this.baseline.set('receiptTemplates', this.canonical(db.receiptTemplates));
+      },
+      persistJournal() {
+        if (!this.target()) return Promise.resolve(true);
+        const key = this.journalKey(), rev = this._journalRev = Math.max(Date.now(), this._journalRev + 1);
+        const aliases = [...this.keys];
+        const journal = {rev, entries: [...this.pending], aliases};
         try {
-          if (meta.companyName) db.companyName = meta.companyName;
-          if (meta.companyPhone !== undefined) db.companyPhone = meta.companyPhone;
-          if (meta.companyAddress !== undefined) db.companyAddress = meta.companyAddress;
-          const remoteDirHash = meta.directorPasswordHash || meta.masterPasswordHash || meta.adminPasswordHash || meta.directorPassword || meta.masterPassword;
-          if (remoteDirHash) {
-            db.directorPasswordHash = String(remoteDirHash).trim();
-          } else if (db.directorPasswordHash) {
-            setTimeout(() => this.pushFullDB(true), 200);
+          localStorage.setItem(key, JSON.stringify(journal));
+          this._journalOK = true;
+          return Promise.resolve(true);
+        } catch (e) {
+          // Bulk import/receipt images can exceed localStorage capacity. IDB is asynchronous.
+          this._journalOK = false;
+          const job = this._journalWrite.then(async () => {
+            try { await StorageEngine.cachePut(journal,key); return true; }
+            catch (err) { console.error('Outbox save:',err); return false; }
+          });
+          this._journalWrite = job;
+          return job.then(ok => { if (this._journalRev === rev) { this._journalOK = ok; this.status(); } return ok; });
+        }
+      },
+      async restoreJournal() {
+        this.pending.clear(); this._journalOK = true;
+        if (!this.target()) return;
+        try {
+          const key = this.journalKey();
+          let local = null, indexed = null;
+          try { const raw = localStorage.getItem(key); if (raw) local = JSON.parse(raw); } catch (e) { console.error('Local outbox:',e); }
+          try { indexed = await StorageEngine.cacheGet(key); } catch (e) { console.error('IndexedDB outbox:',e); }
+          if (Array.isArray(local)) local = {rev:0,entries:local,aliases:[]};
+          const saved = !indexed || (local && local.rev >= indexed.rev) ? local : indexed;
+          if (saved) {
+            this._journalRev = saved.rev || 0;
+            for (const [path,k] of saved.aliases || []) this.keys.set(path,k);
+            this.pending = new Map(saved.entries || []);
+            if (this.pending.size) {
+              const payload = this.buildStructuredPayload();
+              this.applyRemoteSnapshot(payload, false);
+              StorageEngine.save(false);
+            }
           }
-          if (meta.defaultWarrantyDays) db.defaultWarrantyDays = Number(meta.defaultWarrantyDays) || 30;
-          if (meta.cloudUpdateUrl) db.cloudUpdateUrl = meta.cloudUpdateUrl;
-
-          if (incomingBranches.length > 0) db.branches = incomingBranches;
-          if (incomingEmployees.length > 0) db.employees = incomingEmployees;
-          if (val.orders !== undefined) db.orders = incomingOrders;
-          if (val.clients !== undefined) db.clients = incomingClients;
-          if (val.parts !== undefined) db.parts = incomingParts;
-          if (val.receiptTemplates && typeof val.receiptTemplates === 'object') {
-            db.receiptTemplates = val.receiptTemplates;
+        } catch (e) { console.error('Outbox load:', e); this._journalOK = false; this.status(); }
+      },
+      writePath(root, parts, value) {
+        const k = parts[0];
+        if (parts.length === 1) { if (value === null) delete root[k]; else root[k] = value; return; }
+        const next = root[k] && typeof root[k] === 'object' ? {...root[k]} : {};
+        root[k] = next; this.writePath(next, parts.slice(1), value);
+      },
+      // Keep a non-overlapping update map; fold descendants into pending creates/deletes.
+      enqueue(path, value) {
+        for (const [parent, current] of this.pending) {
+          if (path.startsWith(parent + '/')) {
+            const next = current && typeof current === 'object' ? {...current} : {};
+            this.writePath(next, path.slice(parent.length + 1).split('/'), value);
+            this.pending.set(parent, this.canonical(next)); return;
           }
-
-          db.initialized = true;
-          normalizeAndMigrateDB();
-          ensureReceiptTemplates();
-          this._lastPushedJson = JSON.stringify(this.buildStructuredPayload());
-          StorageEngine.save(false);
-
-          const setupScreen = document.getElementById('setup-screen');
-          if (setupScreen) setupScreen.classList.add('hidden');
-          refreshShellUI();
-          renderWorkspace();
-        } finally {
-          this.isApplyingRemote = false;
+        }
+        for (const key of this.pending.keys()) if (key.startsWith(path + '/')) this.pending.delete(key);
+        this.pending.set(path, value);
+      },
+      compareRecord(path, value) {
+        const next = this.canonical(value), prev = this.baseline.get(path) ?? null;
+        if (this.same(next, prev)) return;
+        if (next === null || prev === null) this.enqueue(path, next);
+        else for (const key of new Set([...Object.keys(prev), ...Object.keys(next)])) {
+          const before = prev[key] ?? null, after = next[key] ?? null;
+          if (!this.same(before, after)) this.enqueue(path + '/' + key, after);
+        }
+        if (next === null) this.baseline.delete(path); else this.baseline.set(path, next);
+      },
+      capture(scopes) {
+        const full = scopes === '*';
+        if (full || scopes.some(([col]) => col === 'orders')) invalidateOrders();
+        const firstSetup = full && db.initialized && !this.baseline.get('meta')?.initialized;
+        const list = full ? [...this.collections.map(c => [c]), ['meta'], ['receiptTemplates']] : scopes;
+        // Cache invalidation is also needed in local-only mode.
+        for (const [col, id] of list) {
+          if (this.collections.includes(col)) {
+            const rows = id == null ? db[col] || [] : (db[col] || []).filter(r => String(r.id) === String(id));
+            for (const r of rows) { searchCache.delete(r); warrantyCache.delete(r); }
+            if (!this.target()) continue;
+            if (id != null) this.compareRecord(col + '/' + this.recordKey(col,id), rows[0] || null);
+            else {
+              const seen = new Set();
+              for (const row of rows) if (row?.id != null) { const path = col + '/' + this.recordKey(col,row.id); seen.add(path); this.compareRecord(path,row); }
+              for (const path of [...this.baseline.keys()]) if (path.startsWith(col + '/') && !seen.has(path)) this.compareRecord(path,null);
+            }
+          } else if (this.target()) {
+            if (firstSetup) this.baseline.delete(col);
+            this.compareRecord(col, col === 'meta' ? this.meta() : db.receiptTemplates);
+          }
+        }
+        if (this.target() && list.length) this.persistJournal();
+      },
+      overlay(path, raw) {
+        let val = raw == null ? null : raw;
+        for (const [key, value] of this.pending) {
+          if (key === path) val = value;
+          else if (key.startsWith(path + '/')) {
+            const copy = val && typeof val === 'object' ? {...val} : {};
+            this.writePath(copy, key.slice(path.length + 1).split('/'), value); val = copy;
+          } else if (path.startsWith(key + '/')) {
+            let nested = value; for (const p of path.slice(key.length + 1).split('/')) nested = nested?.[p];
+            val = nested ?? null;
+          }
+        }
+        return val;
+      },
+      normalizeRecord(col, key, raw) {
+        if (!raw || typeof raw !== 'object') return null;
+        const row = {...raw}; if (row.id == null) row.id = key;
+        if (col === 'orders') {
+          row.works = Array.isArray(row.works) ? row.works.filter(Boolean) : row.works && typeof row.works === 'object' ? Object.values(row.works).filter(Boolean) : [];
+          if (row.issuedDate) row.issuedDate = normalizeDateToIso(row.issuedDate) || row.issuedDate;
+          if (row.status === 'issued' && row.issuedDate && Number(row.warrantyDays) > 0 && !row.warrantyUntil) row.warrantyUntil = addDaysToIsoDate(row.issuedDate, Number(row.warrantyDays));
+        }
+        if (col === 'employees') {
+          const role = String(row.role || '').trim().toLowerCase();
+          row.role = ['director','admin','administrator','owner','superadmin','директор','админ','адмін','администратор','адміністратор','власник','владелец','керівник','руководитель'].includes(role) || row.isAdmin === true || row.isDirector === true ? 'director' : 'master';
+          row.active = isEmployeeActive(row);
+        }
+        return row;
+      },
+      normalizeTemplates(raw) {
+        if (!raw || typeof raw !== 'object') return;
+        db.receiptTemplates = {...raw};
+        for (const tab of ['intake','issue']) {
+          const tpl = db.receiptTemplates[tab];
+          if (tpl?.images && !Array.isArray(tpl.images) && typeof tpl.images === 'object') db.receiptTemplates[tab] = {...tpl,images:Object.values(tpl.images)};
+        }
+        ensureReceiptTemplates();
+      },
+      applyMeta(raw) {
+        if (!raw || typeof raw !== 'object') return;
+        for (const k of ['companyName','companyPhone','companyAddress','cloudUpdateUrl']) if (raw[k] !== undefined) db[k] = raw[k];
+        const hash = raw.directorPasswordHash || raw.masterPasswordHash || raw.adminPasswordHash || raw.directorPassword || raw.masterPassword;
+        if (hash) db.directorPasswordHash = String(hash).trim();
+        if (raw.defaultWarrantyDays !== undefined) db.defaultWarrantyDays = Number(raw.defaultWarrantyDays) || 30;
+        if (raw.initialized) db.initialized = true;
+      },
+      applyRemoteSnapshot(raw, refresh = true) {
+        if (!raw || typeof raw !== 'object') return false;
+        const meta = raw.meta || raw;
+        const mergedMeta = this.overlay('meta',meta) || {};
+        if (!mergedMeta.companyName && !mergedMeta.initialized && !this.collections.some(c => Object.keys(this.overlay(c,raw[c]) || {}).length)) return false;
+        this.keys.clear(); invalidateOrders();
+        this.applyMeta(mergedMeta);
+        for (const col of this.collections) {
+          const rawMap = this.overlay(col, raw[col]) || {};
+          db[col] = Object.entries(rawMap).map(([key,val]) => {
+            const row = this.normalizeRecord(col,key,val);
+            if (row && this.safeKey(row.id) !== key) this.keys.set(col + '/' + String(row.id), key);
+            return row;
+          }).filter(Boolean);
+        }
+        const receipt = this.overlay('receiptTemplates',raw.receiptTemplates);
+        if (receipt && typeof receipt === 'object') this.normalizeTemplates(receipt);
+        db.initialized = true;
+        normalizeAndMigrateDB(); ensureReceiptTemplates(); this.resetBaseline();
+        if (refresh) {
+          document.getElementById('setup-screen')?.classList.add('hidden');
+          this.queueRender('all'); StorageEngine.save(false);
         }
         return true;
       },
-
-      async connect(cfg, silent = false) {
-        if (!cfg || !cfg.databaseURL) {
-          if (!silent) showToast('Вкажіть Database URL у налаштуваннях Firebase!', 'error');
-          return false;
+      hasPending(path) {
+        for (const key of this.pending.keys()) if (key === path || key.startsWith(path + '/') || path.startsWith(key + '/')) return true;
+        return false;
+      },
+      applyRecord(col,key,raw) {
+        const path = col + '/' + key;
+        if (this.hasPending(path)) this._deferred.set(path, raw);
+        const next = this.normalizeRecord(col,key,this.overlay(path,raw));
+        const prev = this.baseline.get(path) ?? null, canonical = this.canonical(next);
+        if (this.same(prev,canonical)) return;
+        const rows = db[col] || (db[col] = []);
+        const oldIndex = rows.findIndex(r => this.recordKey(col,r.id) === key);
+        if (next) {
+          if (this.safeKey(next.id) !== key) this.keys.set(col + '/' + String(next.id),key);
+          if (oldIndex >= 0) rows[oldIndex] = next; else rows.unshift(next);
+          this.baseline.set(path,canonical);
+        } else {
+          if (oldIndex >= 0) { this.keys.delete(col + '/' + String(rows[oldIndex].id)); rows.splice(oldIndex,1); }
+          this.baseline.delete(path);
         }
-        if (typeof firebase === 'undefined') {
-          if (!silent) showToast('SDK Firebase не завантажено (перевірте інтернет).', 'error');
-          return false;
+        if (col === 'orders') invalidateOrders();
+        this.queueRender(col); StorageEngine.save(false);
+      },
+      applySmall(node,raw) {
+        if (this.hasPending(node)) this._deferred.set(node,raw);
+        const val = this.overlay(node,raw);
+        const before = this.baseline.get(node);
+        if (node === 'meta') this.applyMeta(val);
+        else if (val && typeof val === 'object') this.normalizeTemplates(val);
+        const next = this.canonical(node === 'meta' ? this.meta() : db.receiptTemplates);
+        if (this.same(before,next)) return;
+        this.baseline.set(node,next); this.queueRender(node); StorageEngine.save(false);
+      },
+      queueRender(col) {
+        this._changed.add(col);
+        if (this._renderTimer) return;
+        const run = () => {
+          this._renderTimer = null;
+          if (document.hidden) { this._renderTimer = setTimeout(run, 1000); return; }
+          const changes = this._changed; this._changed = new Set();
+          const all = changes.has('all');
+          const shell = all || ['meta','branches','employees'].some(k => changes.has(k));
+          if (shell) {
+            const active = getActiveEmployees();
+            if (active.length && !active.some(e => String(e.id) === String(db.currentUserId))) db.currentUserId = active[0].id;
+            if (!isDirector() && ['company','settings'].includes(currentView)) currentView = 'orders';
+            refreshShellUI();
+          }
+          const relevant = {orders:['orders','branches','employees'],clients:['orders','clients'],warehouse:['parts'],analytics:['orders','employees','branches'],company:['meta','branches','employees'],settings:['meta','receiptTemplates']}[currentView] || [];
+          if (all || relevant.some(k => changes.has(k))) {
+            const active = document.activeElement;
+            if (['settings','company','analytics'].includes(currentView) && active?.closest('#workspace') && /^(INPUT|TEXTAREA|SELECT)$/.test(active.tagName)) {
+              changes.forEach(k => this._changed.add(k)); this._renderTimer = setTimeout(run,500); return;
+            }
+            renderWorkspaceKeepingScroll();
+          }
+        };
+        this._renderTimer = setTimeout(run,120);
+      },
+      listen(ref,event,cb) {
+        const generation = this._generation;
+        const fn = snap => { if (generation === this._generation) cb(snap); };
+        ref.on(event,fn,err => { if (generation === this._generation) { console.error('Firebase listener:',err); this.setStatus('Помилка доступу до Firebase Rules','red'); } });
+        this.listeners.push([ref,event,fn]);
+      },
+      attachListeners() {
+        for (const col of this.collections) {
+          const ref = this.rootRef.child(col);
+          this.listen(ref,'child_added',s => this.applyRecord(col,s.key,s.val()));
+          this.listen(ref,'child_changed',s => this.applyRecord(col,s.key,s.val()));
+          this.listen(ref,'child_removed',s => this.applyRecord(col,s.key,null));
+          // Reconcile removals between the initial root read and subscription setup once.
+          const gen = this._generation;
+          ref.once('value').then(s => {
+            if (gen !== this._generation) return;
+            const raw = s.val() || {};
+            for (const path of [...this.baseline.keys()]) if (path.startsWith(col + '/')) {
+              const key = path.slice(col.length+1);
+              if (!Object.prototype.hasOwnProperty.call(raw,key)) this.applyRecord(col,key,null);
+            }
+          }).catch(e => console.error('Initial reconciliation:',e));
         }
-
+        for (const node of ['meta','receiptTemplates']) this.listen(this.rootRef.child(node),'value',s => this.applySmall(node,s.val()));
+        this.listen(this.database.ref('.info/connected'),'value',s => { this.online = s.val() === true; this.status(); if (this.online) this.schedulePush(); });
+      },
+      async stopConnection() {
+        this._generation++; clearTimeout(this._pushTimer); clearTimeout(this._retryTimer); clearTimeout(this._renderTimer); this._renderTimer = null; this._changed.clear(); this._deferred.clear();
+        for (const [ref,event,fn] of this.listeners) ref.off(event,fn);
+        this.listeners = []; this.connected = false; this.online = false; this._flight = null;
+        const old = this.app; this.app = null; this.database = null; this.rootRef = null;
+        if (old) try { await old.delete(); } catch (e) { console.error('Firebase disconnect:',e); }
+      },
+      async connect(cfg,silent = false) {
+        if (!cfg?.databaseURL || typeof firebase === 'undefined') { if (!silent) showToast('Перевірте URL та підключення до інтернету (Firebase SDK).','error'); if (cfg?.databaseURL) this.setStatus('SDK Firebase недоступний — локальна робота','amber'); return false; }
+        if (this._connecting) return false;
+        const oldTarget = this.target(); const nextTarget = this.target(cfg);
+        if (oldTarget && oldTarget !== nextTarget && this.pending.size) { showToast('Спочатку синхронізуйте локальні зміни з поточною базою.','error'); return false; }
+        this._connecting = true;
         try {
-          const cleanUrl = String(cfg.databaseURL).trim().replace(/\/+$/, '');
-          const cleanPath = String(cfg.path || 'crm_data').trim().replace(/^\/+|\/+$/g, '') || 'crm_data';
-          db.firebaseConfig = {
-            apiKey: String(cfg.apiKey || '').trim(),
-            databaseURL: cleanUrl,
-            projectId: String(cfg.projectId || '').trim(),
-            path: cleanPath
-          };
-
-          if (this.rootRef) {
-            try { this.rootRef.off(); } catch (e) {}
-          }
-          if (this.app) {
-            try { await this.app.delete(); } catch (e) {}
-          }
-
-          this.setStatus('Підключення до хмари...', 'amber');
-          this.app = firebase.initializeApp({
-            apiKey: db.firebaseConfig.apiKey || 'AIzaSyDummyKeyForPublicRTDB',
-            databaseURL: db.firebaseConfig.databaseURL,
-            projectId: db.firebaseConfig.projectId || undefined
-          }, 'sc_crm_rtdb_' + Date.now());
-
-          this.database = this.app.database();
-          this.rootRef = this.database.ref(cleanPath);
-
-          const initialSnap = await Promise.race([
-            this.rootRef.once('value'),
-            new Promise((_, rej) => setTimeout(() => rej(new Error('Таймаут зʼєднання з Firebase (10 сек). Перевірте URL або інтернет.')), 10000))
-          ]);
-
-          const remoteVal = initialSnap.val();
-          this.connected = true;
-
-          const hasRemote = this.applyRemoteSnapshot(remoteVal);
-          if (!hasRemote && db.initialized) {
-            await this.pushFullDB(true);
-          }
-
-          this.rootRef.on('value', (snap) => {
-            const val = snap.val();
-            if (!val) return;
-            this.applyRemoteSnapshot(val);
-            this.setStatus('Хмара онлайн (жива синхронізація)', 'green');
-          }, (err) => {
-            console.error('Firebase listener error:', err);
-            this.setStatus('Помилка доступу до Firebase Rules', 'red');
-            showToast('Помилка прав Firebase: ' + err.message, 'error');
-          });
-
+          await this.stopConnection();
+          const cleanPath = String(cfg.path || 'crm_data').trim().replace(/^\/+|\/+$/g,'') || 'crm_data';
+          db.firebaseConfig = {apiKey:String(cfg.apiKey || '').trim(),databaseURL:String(cfg.databaseURL).trim().replace(/\/+$/,''),projectId:String(cfg.projectId || '').trim(),path:cleanPath};
+          if (oldTarget !== nextTarget) { this.keys.clear(); this.resetBaseline(); await this.restoreJournal(); }
           StorageEngine.save(false);
-          this.setStatus('Хмара онлайн (жива синхронізація)', 'green');
-          if (!silent) showToast('Підключено до Firebase! Дані синхронізуються автоматично.');
-          return true;
-        } catch (err) {
-          this.connected = false;
-          this.setStatus('Помилка підключення до хмари', 'red');
-          if (!silent) showToast('Помилка Firebase: ' + err.message, 'error');
-          return false;
-        }
-      },
-
-      schedulePush() {
-        if (!this.connected || !this.rootRef || this.isApplyingRemote) return;
-        clearTimeout(this._pushTimer);
-        this.setStatus('Збереження у хмару...', 'amber');
-        this._pushTimer = setTimeout(() => this.pushFullDB(false), 350);
-      },
-
-      async pushFullDB(force = false) {
-        if (!this.connected || !this.rootRef) return false;
-        try {
-          const payload = this.buildStructuredPayload();
-          const serialized = JSON.stringify(payload);
-          if (!force && serialized === this._lastPushedJson) {
-            this.setStatus('Хмара онлайн (жива синхронізація)', 'green');
-            return true;
+          this.setStatus('Підключення до хмари...','amber');
+          this.app = firebase.initializeApp({apiKey:db.firebaseConfig.apiKey || 'AIzaSyDummyKeyForPublicRTDB',databaseURL:db.firebaseConfig.databaseURL,projectId:db.firebaseConfig.projectId || undefined},'sc_crm_rtdb_' + Date.now());
+          this.database = this.app.database(); this.rootRef = this.database.ref(cleanPath);
+          let timeout;
+          const snap = await Promise.race([this.rootRef.once('value'),new Promise((_,reject) => { timeout = setTimeout(() => reject(new Error('Таймаут зʼєднання (10 сек)')),10000); })]).finally(() => clearTimeout(timeout));
+          const remote = snap.val();
+          if (!this.applyRemoteSnapshot(remote) && db.initialized) {
+            // Explicit first creation only. Transaction avoids overwriting a DB created by another PC.
+            const payload = this.buildStructuredPayload();
+            const created = await this.rootRef.transaction(current => current == null ? payload : undefined);
+            if (!created.committed && created.snapshot.val()) this.applyRemoteSnapshot(created.snapshot.val());
+            else this.resetBaseline();
           }
-          await this.rootRef.set(payload);
-          this._lastPushedJson = serialized;
-          this.setStatus('Хмара онлайн (жива синхронізація)', 'green');
+          if (remote?.meta && !remote.meta.directorPasswordHash && !remote.meta.masterPasswordHash && !remote.meta.adminPasswordHash && !remote.meta.directorPassword && !remote.meta.masterPassword && db.directorPasswordHash) {
+            this.enqueue('meta/directorPasswordHash',db.directorPasswordHash); this.persistJournal();
+          }
+          this.connected = true; if (this.keys.size) this.persistJournal(); this.attachListeners(); this.status(); this.schedulePush();
+          if (!silent) showToast('Підключено до Firebase!');
           return true;
-        } catch (err) {
-          console.error('Firebase push error:', err);
-          this.setStatus('Помилка запису у Firebase', 'red');
-          showToast('Не вдалося записати в Firebase: ' + err.message, 'error');
+        } catch (e) {
+          console.error('Firebase connect:',e); await this.stopConnection();
+          this.setStatus('Хмара офлайн — локальна робота','amber');
+          if (!silent) showToast('Помилка Firebase: ' + e.message,'error');
+          this._retryTimer = setTimeout(() => { if (db.firebaseConfig?.databaseURL) this.connect(db.firebaseConfig,true); },10000);
           return false;
-        }
+        } finally { this._connecting = false; }
       },
-
+      schedulePush() {
+        if (!this.target() || !this.pending.size) return;
+        this.status(); clearTimeout(this._pushTimer);
+        if (this.connected && this.online && !this._flight) this._pushTimer = setTimeout(() => this.flush(),180);
+      },
+      async flush() {
+        if (this._flight) return this._flight;
+        if (!this.pending.size) return true;
+        if (!this.connected || !this.online || !this.rootRef) return false;
+        clearTimeout(this._pushTimer);
+        const generation = this._generation, sent = new Map(this.pending);
+        const update = Object.fromEntries(sent);
+        // Multipath update is atomic, including order + stock changes.
+        if (!Object.prototype.hasOwnProperty.call(update,'meta')) update['meta/updatedAt'] = Date.now();
+        else if (update.meta) update.meta = {...update.meta,updatedAt:Date.now()};
+        const ref = this.rootRef;
+        const job = (async () => {
+          try {
+            if (!(await this.persistJournal())) return false;
+            if (generation !== this._generation) return false;
+            await ref.update(update);
+            if (generation !== this._generation) return false;
+            // Persist the local snapshot before removing acknowledged edits from the journal.
+            if (!(await StorageEngine.flush())) return false;
+            if (generation !== this._generation) return false;
+            for (const [path,value] of sent) if (this.pending.has(path) && this.pending.get(path) === value) this.pending.delete(path);
+            // Reconcile any remote change that arrived while an optimistic local patch was pending.
+            for (const [path, raw] of [...this._deferred]) {
+              if (this.hasPending(path)) continue;
+              this._deferred.delete(path);
+              const [col,key] = path.split('/');
+              if (key) this.applyRecord(col,key,raw); else this.applySmall(col,raw);
+            }
+            await this.persistJournal(); this.status(); return true;
+          } catch (e) {
+            console.error('Firebase update:',e); if (generation === this._generation) this.setStatus('Помилка запису — зміни у черзі','red'); return false;
+          }
+        })();
+        this._flight = job;
+        const ok = await job;
+        if (generation === this._generation) { this._flight = null; if (ok) this.schedulePush(); else if (this.online && this.pending.size) this._pushTimer = setTimeout(() => this.flush(),5000); }
+        return ok;
+      },
+      async manualUpload() {
+        if (!this.connected || !this.online) { showToast('Firebase офлайн','error'); return false; }
+        if (!confirm('УВАГА: повне завантаження замінить онлайн-базу локальною копією. Продовжити?')) return false;
+        if (!(await this.flush())) return false;
+        try { await this.rootRef.set(this.buildStructuredPayload()); return true; }
+        catch (e) { showToast('Помилка Firebase: ' + e.message,'error'); return false; }
+      },
       async pullNow() {
-        if (!this.connected || !this.rootRef) {
-          showToast('Спочатку підключіть Firebase!', 'error');
-          return;
-        }
-        try {
-          this.setStatus('Завантаження з хмари...', 'amber');
-          const snap = await this.rootRef.once('value');
-          const ok = this.applyRemoteSnapshot(snap.val());
-          this.setStatus('Хмара онлайн (жива синхронізація)', 'green');
-          if (ok) showToast('Дані успішно оновлено з хмари Firebase!');
-          else showToast('У хмарі Firebase за цим шляхом база поки порожня.', 'error');
-        } catch (err) {
-          this.setStatus('Помилка читання з хмари', 'red');
-          showToast('Помилка читання Firebase: ' + err.message, 'error');
-        }
+        if (!this.connected || !this.online) { showToast('Firebase офлайн','error'); return; }
+        try { const snap = await this.rootRef.once('value'); if (this.applyRemoteSnapshot(snap.val())) showToast('Дані оновлено з хмари!'); else showToast('Онлайн-база порожня','error'); }
+        catch (e) { showToast('Помилка читання Firebase: ' + e.message,'error'); }
       },
-
-      async disconnect() {
-        if (this.rootRef) {
-          try { this.rootRef.off(); } catch (e) {}
-        }
-        if (this.app) {
-          try { await this.app.delete(); } catch (e) {}
-        }
-        this.app = null;
-        this.database = null;
-        this.rootRef = null;
-        this.connected = false;
-        db.firebaseConfig = null;
-        StorageEngine.save(false);
-        this.setStatus(StorageEngine.isElectron ? t('storageBackupActive') : t('storageBrowser'), 'green');
-        showToast('Хмарну синхронізацію Firebase вимкнено.');
-        if (currentView === 'settings') renderWorkspace();
+      async disconnect(quiet = false) {
+        if (this._connecting || this.pending.size) { showToast('Спочатку завершіть синхронізацію змін.','error'); return false; }
+        await this.stopConnection(); db.firebaseConfig = null; this.keys.clear(); this.resetBaseline(); StorageEngine.save(false);
+        this.setStatus(StorageEngine.isElectron ? t('storageBackupActive') : t('storageBrowser'),'green');
+        if (!quiet) { showToast('Хмарну синхронізацію вимкнено.'); if (currentView === 'settings') renderWorkspace(); }
+        return true;
       }
     };
 
@@ -4439,7 +4758,7 @@
           <button type="button" onclick="FirebaseSync.pullNow()" class="px-3.5 py-2 rounded-xl border border-gray-300 bg-white hover:bg-gray-100 font-semibold text-gray-700">
             ⬇ Завантажити з хмари зараз
           </button>
-          <button type="button" onclick="FirebaseSync.pushFullDB(true).then(ok => { if(ok) showToast('Всю базу відправлено у хмару Firebase!'); })" class="px-3.5 py-2 rounded-xl bg-[#1c6457] hover:bg-[#154e44] text-white font-semibold">
+          <button type="button" onclick="FirebaseSync.manualUpload().then(ok => { if(ok) showToast('Всю базу відправлено у хмару Firebase!'); })" class="px-3.5 py-2 rounded-xl bg-[#1c6457] hover:bg-[#154e44] text-white font-semibold">
             ⬆ Відправити всю базу у хмару
           </button>
         </div>
@@ -4470,9 +4789,17 @@
       const repairedDates = normalizeAndMigrateDB();
       ensureReceiptTemplates();
 
-      if (repairedDates) {
-        StorageEngine.save(false);
-      }
+      FirebaseSync.resetBaseline();
+      await FirebaseSync.restoreJournal();
+      if (repairedDates || StorageEngine._dirty) StorageEngine.save(false);
+      window.addEventListener('pagehide', () => StorageEngine.emergencySave());
+      document.addEventListener('visibilitychange', () => { if (document.hidden) StorageEngine.flush(); });
+      if (window.electronAPI?.onFlushRequest) window.electronAPI.onFlushRequest(async () => {
+        const journalOk = !FirebaseSync.target() || await FirebaseSync.persistJournal();
+        const ok = (await StorageEngine.flush()) && journalOk;
+        if (!ok) StorageEngine.emergencySave();
+        window.electronAPI.flushComplete(ok);
+      });
 
       if (StorageEngine.isElectron) {
         await PrinterManager.refresh(true);
@@ -4483,11 +4810,7 @@
       setLang(currentLang);
 
       if (db.firebaseConfig && db.firebaseConfig.databaseURL) {
-        FirebaseSync.connect(db.firebaseConfig, true).then((ok) => {
-          if (ok && repairedDates) {
-            FirebaseSync.pushFullDB(true);
-          }
-        });
+        FirebaseSync.connect(db.firebaseConfig, true);
       }
 
       if (db.cloudUpdateUrl && db.cloudAutoCheck !== false) {
