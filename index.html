@@ -301,6 +301,10 @@
             <span class="sb-hide-compact" id="sidebar-backup-state">Активний</span>
           </span>
         </div>
+        <button id="check-update-all" type="button" onclick="CloudUpdater.checkForUpdates(false)" title="Перевірити оновлення" class="w-full flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-[#255953] sb-center-compact text-[#b7d1cd]">
+          <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v12m-5-5l5 5 5-5M4 16v4h16v-4"/></svg>
+          <span class="sb-hide-compact" data-i18n="checkUpdates">Перевірити оновлення</span>
+        </button>
         <div class="sb-hide-compact text-[10px] opacity-80 truncate" id="sidebar-company-sub"></div>
       </div>
     </aside>
@@ -386,7 +390,7 @@
     // =========================================================================
     // 0. APPLICATION VERSION & CLOUD UPDATE METADATA
     // =========================================================================
-    const APP_VERSION = '2.2.6';
+    const APP_VERSION = '2.2.7';
     const APP_BUILD_DATE = '2026-11-27';
     const STORAGE_KEY = 'sc_crm_db_v2';
 
@@ -395,6 +399,7 @@
     // =========================================================================
     const I18N = {
       ua: {
+        checkUpdates: 'Перевірити оновлення',
         locationLabel: 'Локація',
         switchUser: 'Змінити користувача',
         allBranches: 'Усі філії',
@@ -466,6 +471,7 @@
         storageBrowser: 'Локально (Браузер)'
       },
       ru: {
+        checkUpdates: 'Проверить обновления',
         locationLabel: 'Локация',
         switchUser: 'Сменить пользователя',
         allBranches: 'Все филиалы',
@@ -888,10 +894,24 @@
       return String(h);
     }
 
+    const PASSWORD_FIELDS = ['directorPasswordHash','masterPasswordHash','adminPasswordHash','directorPassword','masterPassword','adminPassword'];
+    function readDirectorCredential(source = db) {
+      for (const key of PASSWORD_FIELDS) {
+        const value = source?.[key];
+        if ((typeof value === 'string' || typeof value === 'number') && String(value).trim()) return String(value).trim();
+      }
+      return '';
+    }
+    function setDirectorCredential(value) {
+      const clean = String(value ?? '').trim();
+      if (!clean) return false;
+      db.directorPasswordHash = clean;
+      for (const key of PASSWORD_FIELDS.slice(1)) delete db[key];
+      return true;
+    }
     function verifyDirectorPassword(inputPass) {
-      const storedRaw = db.directorPasswordHash ?? db.masterPasswordHash ?? db.adminPasswordHash ?? db.directorPassword ?? db.masterPassword ?? db.adminPassword ?? '';
-      const stored = String(storedRaw).trim();
-      if (!stored) return true;
+      const stored = readDirectorCredential();
+      if (!stored) return false;
       const val = String(inputPass || '');
       const trimmed = val.trim();
       if (stored.startsWith('h_')) {
@@ -918,6 +938,8 @@
 
     function normalizeAndMigrateDB() {
       if (!db || typeof db !== 'object') db = createEmptyDB();
+      const existingCredential = readDirectorCredential();
+      if (existingCredential) setDirectorCredential(existingCredential);
       db.branches = toArrayFromFirebase(db.branches);
       db.employees = toArrayFromFirebase(db.employees);
       db.orders = toArrayFromFirebase(db.orders);
@@ -1126,6 +1148,12 @@
     const CloudUpdater = {
       pendingHtml: '',
       pendingVersion: '',
+      _checking: false,
+      _checkTimer: null,
+      scheduleCheck() {
+        clearTimeout(this._checkTimer);
+        if (db.cloudUpdateUrl && db.cloudAutoCheck !== false) this._checkTimer = setTimeout(() => this.checkForUpdates(true), 2500);
+      },
 
       normalizeUpdateUrl(rawUrl) {
         let u = String(rawUrl || '').trim();
@@ -1155,16 +1183,19 @@
       },
 
       async checkForUpdates(silent = true) {
+        if (this._checking) return;
         const url = this.normalizeUpdateUrl(db.cloudUpdateUrl);
         if (!url) {
           if (!silent) showToast('Вкажіть URL хмарного оновлення у налаштуваннях!', 'error');
           return;
         }
+        this._checking = true;
         try {
           const sep = url.includes('?') ? '&' : '?';
           const resp = await fetch(`${url}${sep}_t=${Date.now()}`, { cache: 'no-store' });
           if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
           const html = await resp.text();
+          if (url !== this.normalizeUpdateUrl(db.cloudUpdateUrl)) return;
           const remoteVer = this.extractVersion(html);
           if (!remoteVer || !html.includes('</html>')) {
             throw new Error('Файл за посиланням не є коректною збіркою CRM');
@@ -1182,7 +1213,7 @@
           }
         } catch (err) {
           if (!silent) showToast('Помилка перевірки оновлень: ' + err.message, 'error');
-        }
+        } finally { this._checking = false; }
       },
 
       async applyPendingUpdate() {
@@ -1203,7 +1234,7 @@
       },
 
       async applyManualFile(file) {
-        if (!file) return;
+        if (!requireDirectorAccess() || !file) return;
         if (!StorageEngine.isElectron || !window.electronAPI.applyHotUpdate) {
           showToast('Оновлення з файлу доступне у Windows-програмі (.exe)', 'error');
           return;
@@ -1311,6 +1342,8 @@
       document.querySelectorAll('[data-i18n]').forEach(el => {
         el.textContent = t(el.getAttribute('data-i18n'));
       });
+      const updateButton = document.getElementById('check-update-all');
+      if (updateButton) updateButton.title = t('checkUpdates');
       refreshShellUI();
       renderWorkspace();
     }
@@ -3126,7 +3159,7 @@
               <form onsubmit="changeDirectorPassword(event)" class="bg-white p-5 rounded-2xl border border-gray-100 space-y-3">
                 <div class="flex items-center justify-between gap-2">
                   <h2 class="text-sm font-bold text-gray-900">Зміна майстер-пароля Директора</h2>
-                  ${(db.directorPasswordHash || db.masterPasswordHash || db.adminPasswordHash)
+                  ${readDirectorCredential()
                     ? `<span class="px-2.5 py-0.5 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-semibold">✓ Встановлено</span>`
                     : `<span class="px-2.5 py-0.5 rounded-lg bg-amber-50 text-amber-800 border border-amber-200 text-[11px] font-semibold">⚠ Не задано</span>`}
                 </div>
@@ -3218,10 +3251,8 @@
       if (!requireDirectorAccess()) return;
       const p = document.getElementById('new-dir-pass').value;
       if (p.length < 4) return;
-      db.directorPasswordHash = hashPassword(p);
-      delete db.masterPasswordHash;
-      delete db.adminPasswordHash;
-      saveDB(true, [['meta']]);
+      setDirectorCredential(hashPassword(p));
+      saveDB(true, [['password']]);
       if (FirebaseSync.connected) {
         FirebaseSync.flush();
       }
@@ -3509,7 +3540,7 @@
     // =========================================================================
     function openSwitchUserModal() {
       const emps = getActiveEmployees();
-      const hasStoredPass = Boolean(db.directorPasswordHash || db.masterPasswordHash || db.adminPasswordHash);
+      const hasStoredPass = Boolean(readDirectorCredential());
       openModal(`
         <div class="p-6 space-y-4 max-h-[90vh] overflow-y-auto">
           <div class="flex items-center justify-between border-b border-gray-100 pb-3">
@@ -3575,8 +3606,8 @@
                 <input id="dir-new-name" placeholder="Наприклад: Олександр Коваленко" class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2" />
               </div>
               <div>
-                <label class="block font-semibold text-gray-700 mb-1">${hasStoredPass ? 'Введіть діючий майстер-пароль Директора *' : 'Задайте майстер-пароль Директора (мін. 4 символи) *'}</label>
-                <input id="dir-promote-pass" type="password" minlength="4" placeholder="${hasStoredPass ? 'Майстер-пароль' : 'Придумайте пароль (мін. 4 символи)'}" class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2" />
+                <label class="block font-semibold text-gray-700 mb-1">${hasStoredPass ? 'Введіть діючий майстер-пароль Директора *' : 'Майстер-пароль відсутній — потрібне відновлення'}</label>
+                <input id="dir-promote-pass" type="password" minlength="4" placeholder="${hasStoredPass ? 'Майстер-пароль' : 'Потрібне відновлення пароля'}" class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2" />
               </div>
               <button type="button" onclick="submitPromoteOrAddDirector()" class="w-full py-2 rounded-lg bg-[#143430] hover:bg-[#1c6457] text-white font-semibold">
                 Підтвердити та надати права Директора
@@ -3591,7 +3622,7 @@
       const targetVal = document.getElementById('dir-promote-target')?.value || '__new__';
       const newName = (document.getElementById('dir-new-name')?.value || '').trim();
       const pass = document.getElementById('dir-promote-pass')?.value || '';
-      const hasStoredPass = Boolean(db.directorPasswordHash || db.masterPasswordHash || db.adminPasswordHash);
+      const hasStoredPass = Boolean(readDirectorCredential());
 
       if (targetVal === '__new__' && !newName) {
         showToast('Вкажіть ПІБ нового Директора!', 'error');
@@ -3604,11 +3635,8 @@
           return;
         }
       } else {
-        if (pass.trim().length < 4) {
-          showToast('Задайте майстер-пароль (мінімум 4 символи)!', 'error');
-          return;
-        }
-        db.directorPasswordHash = hashPassword(pass.trim());
+        showToast('Майстер-пароль відсутній. Відновіть його через профіль Директора або зверніться до власника.', 'error');
+        return;
       }
 
       let activeEmp = null;
@@ -3650,28 +3678,20 @@
       if (!emp) return;
       if (emp.role === 'director') {
         pendingDirectorId = emp.id;
-        let storedHash = db.directorPasswordHash || db.masterPasswordHash || db.adminPasswordHash || '';
-        if (!storedHash && FirebaseSync.connected && FirebaseSync.rootRef) {
+        let storedHash = readDirectorCredential();
+        if (FirebaseSync.connected && FirebaseSync.online && FirebaseSync.rootRef && !FirebaseSync.hasPending('meta/directorPasswordHash')) {
           try {
             const snap = await FirebaseSync.rootRef.child('meta').once('value');
             const remoteMeta = snap.val() || {};
-            const remoteHash = remoteMeta.directorPasswordHash || remoteMeta.masterPasswordHash || remoteMeta.adminPasswordHash || '';
+            const remoteHash = readDirectorCredential(remoteMeta);
             if (remoteHash) {
-              db.directorPasswordHash = remoteHash;
+              setDirectorCredential(remoteHash);
               storedHash = remoteHash;
               StorageEngine.save(false);
             }
           } catch (e) {}
         }
-        if (!storedHash) {
-          db.currentUserId = emp.id;
-          saveDB();
-          closeModal();
-          refreshShellUI();
-          renderWorkspace();
-          showToast('Вхід виконано. Задайте новий майстер-пароль у розділі «Моя компанія»!');
-          return;
-        }
+        if (!storedHash) showToast('Майстер-пароль відсутній. Зачекайте синхронізацію або відновіть через Backup.', 'error');
         const promptBox = document.getElementById('director-pass-prompt');
         if (promptBox) {
           promptBox.classList.remove('hidden');
@@ -3692,6 +3712,7 @@
     function confirmDirectorLogin() {
       const inp = document.getElementById('switch-dir-pass');
       const val = inp ? inp.value : '';
+      if (!readDirectorCredential()) { showToast('Майстер-пароль відсутній. Потрібне відновлення.', 'error'); return; }
       if (!verifyDirectorPassword(val)) {
         showToast('Невірний майстер-пароль Директора! Перевірте розкладку клавіатури або скиньте через Backup.', 'error');
         return;
@@ -3723,11 +3744,9 @@
           if (db.companyName && parsed.companyName && parsed.companyName !== db.companyName) {
             throw new Error('Файл резервної копії належить іншій компанії');
           }
-          db.directorPasswordHash = hashPassword(newPass);
-          delete db.masterPasswordHash;
-          delete db.adminPasswordHash;
+          setDirectorCredential(hashPassword(newPass));
           db.currentUserId = pendingDirectorId;
-          saveDB(true, [['meta']]);
+          saveDB(true, [['password']]);
           if (FirebaseSync.connected) {
             FirebaseSync.flush();
           }
@@ -4277,7 +4296,9 @@
           if (!parsed || typeof parsed !== 'object') throw new Error('Невірний формат JSON');
           const targetConfig = db.firebaseConfig;
           if (targetConfig?.databaseURL && !confirm('Імпорт змінить також підключену онлайн-базу. Продовжити?')) return;
+          const currentCredential = readDirectorCredential();
           db = { ...createEmptyDB(), ...parsed, firebaseConfig: targetConfig, initialized: true };
+          if (currentCredential) setDirectorCredential(currentCredential);
           normalizeAndMigrateDB();
           ensureReceiptTemplates();
           saveDB(true, '*');
@@ -4345,7 +4366,7 @@
       },
       same(a, b) { return JSON.stringify(a) === JSON.stringify(b); },
       meta() {
-        return {initialized: Boolean(db.initialized), companyName: db.companyName || '', companyPhone: db.companyPhone || '', companyAddress: db.companyAddress || '', directorPasswordHash: db.directorPasswordHash || '', defaultWarrantyDays: Number(db.defaultWarrantyDays) || 30, cloudUpdateUrl: db.cloudUpdateUrl || ''};
+        return {initialized: Boolean(db.initialized), companyName: db.companyName || '', companyPhone: db.companyPhone || '', companyAddress: db.companyAddress || '', ...(readDirectorCredential() ? {directorPasswordHash: readDirectorCredential()} : {}), defaultWarrantyDays: Number(db.defaultWarrantyDays) || 30, cloudUpdateUrl: db.cloudUpdateUrl || ''};
       },
       buildStructuredPayload() {
         const out = {meta: {...this.meta(), updatedAt: Date.now()}, receiptTemplates: db.receiptTemplates || createDefaultReceiptTemplates()};
@@ -4396,7 +4417,17 @@
           if (saved) {
             this._journalRev = saved.rev || 0;
             for (const [path,k] of saved.aliases || []) this.keys.set(path,k);
-            this.pending = new Map(saved.entries || []);
+            this.pending = new Map();
+            for (const [path,value] of saved.entries || []) {
+              if (path === 'meta') {
+                if (value && typeof value === 'object') for (const [key,v] of Object.entries(value)) {
+                  // Old whole-meta patches have no reliable evidence of an explicit password change.
+                  if (!PASSWORD_FIELDS.includes(key)) this.enqueue('meta/' + key,v);
+                }
+              } else if (path.startsWith('meta/') && PASSWORD_FIELDS.includes(path.slice(5))) {
+                if (path === 'meta/directorPasswordHash' && typeof value === 'string' && value.trim()) this.enqueue(path,value.trim());
+              } else this.enqueue(path,value);
+            }
             if (this.pending.size) {
               const payload = this.buildStructuredPayload();
               this.applyRemoteSnapshot(payload, false);
@@ -4433,6 +4464,25 @@
         }
         if (next === null) this.baseline.delete(path); else this.baseline.set(path, next);
       },
+      capturePassword() {
+        const credential = readDirectorCredential();
+        if (!credential || !this.target()) return;
+        this.enqueue('meta/directorPasswordHash', credential);
+        const prev = this.baseline.get('meta') || {};
+        this.baseline.set('meta', this.canonical({...prev, directorPasswordHash:credential}));
+      },
+      captureMeta() {
+        const previous = this.baseline.get('meta') || {};
+        const next = this.meta();
+        // Only explicit password changes can write the credential. Never replace meta wholesale.
+        const merged = {...previous};
+        for (const [key,value] of Object.entries(next)) {
+          if (PASSWORD_FIELDS.includes(key)) continue;
+          if (!this.same(previous[key],value)) this.enqueue('meta/' + key,value);
+          merged[key] = value;
+        }
+        this.baseline.set('meta',this.canonical(merged));
+      },
       capture(scopes) {
         const full = scopes === '*';
         if (full || scopes.some(([col]) => col === 'orders')) invalidateOrders();
@@ -4451,8 +4501,9 @@
               for (const path of [...this.baseline.keys()]) if (path.startsWith(col + '/') && !seen.has(path)) this.compareRecord(path,null);
             }
           } else if (this.target()) {
-            if (firstSetup) this.baseline.delete(col);
-            this.compareRecord(col, col === 'meta' ? this.meta() : db.receiptTemplates);
+            if (col === 'password') this.capturePassword();
+            else if (col === 'meta') { this.captureMeta(); if (firstSetup) this.capturePassword(); }
+            else { if (firstSetup) this.baseline.delete(col); this.compareRecord(col, db.receiptTemplates); }
           }
         }
         if (this.target() && list.length) this.persistJournal();
@@ -4497,9 +4548,11 @@
       },
       applyMeta(raw) {
         if (!raw || typeof raw !== 'object') return;
+        const oldUrl = db.cloudUpdateUrl;
         for (const k of ['companyName','companyPhone','companyAddress','cloudUpdateUrl']) if (raw[k] !== undefined) db[k] = raw[k];
-        const hash = raw.directorPasswordHash || raw.masterPasswordHash || raw.adminPasswordHash || raw.directorPassword || raw.masterPassword;
-        if (hash) db.directorPasswordHash = String(hash).trim();
+        const credential = readDirectorCredential(raw);
+        if (credential) setDirectorCredential(credential);
+        if (oldUrl !== db.cloudUpdateUrl) CloudUpdater.scheduleCheck();
         if (raw.defaultWarrantyDays !== undefined) db.defaultWarrantyDays = Number(raw.defaultWarrantyDays) || 30;
         if (raw.initialized) db.initialized = true;
       },
@@ -4509,6 +4562,9 @@
         const mergedMeta = this.overlay('meta',meta) || {};
         if (!mergedMeta.companyName && !mergedMeta.initialized && !this.collections.some(c => Object.keys(this.overlay(c,raw[c]) || {}).length)) return false;
         this.keys.clear(); invalidateOrders();
+        if (!readDirectorCredential(mergedMeta) && raw.meta && !this.hasPending('meta/directorPasswordHash')) {
+          const legacy = readDirectorCredential(raw); if (legacy) mergedMeta.directorPasswordHash = legacy;
+        }
         this.applyMeta(mergedMeta);
         for (const col of this.collections) {
           const rawMap = this.overlay(col, raw[col]) || {};
@@ -4645,8 +4701,9 @@
             if (!created.committed && created.snapshot.val()) this.applyRemoteSnapshot(created.snapshot.val());
             else this.resetBaseline();
           }
-          if (remote?.meta && !remote.meta.directorPasswordHash && !remote.meta.masterPasswordHash && !remote.meta.adminPasswordHash && !remote.meta.directorPassword && !remote.meta.masterPassword && db.directorPasswordHash) {
-            this.enqueue('meta/directorPasswordHash',db.directorPasswordHash); this.persistJournal();
+          if (remote && !readDirectorCredential(remote.meta) && !readDirectorCredential(remote) && !this.hasPending('meta/directorPasswordHash')) {
+            console.warn('Cloud master credential missing; preserving local credential without silently overwriting cloud.');
+            if (isDirector()) showToast('У хмарі відсутній майстер-пароль. Власнику потрібно повторно зберегти його в розділі «Моя компанія».', 'error');
           }
           this.connected = true; if (this.keys.size) this.persistJournal(); this.attachListeners(); this.status(); this.schedulePush();
           if (!silent) showToast('Підключено до Firebase!');
@@ -4671,6 +4728,10 @@
         clearTimeout(this._pushTimer);
         const generation = this._generation, sent = new Map(this.pending);
         const update = Object.fromEntries(sent);
+        if (typeof update['meta/directorPasswordHash'] === 'string' && update['meta/directorPasswordHash'].trim()) {
+          // Remove obsolete aliases only when an explicit credential update is sent.
+          for (const key of PASSWORD_FIELDS.slice(1)) update['meta/' + key] = null;
+        }
         // Multipath update is atomic, including order + stock changes.
         if (!Object.prototype.hasOwnProperty.call(update,'meta')) update['meta/updatedAt'] = Date.now();
         else if (update.meta) update.meta = {...update.meta,updatedAt:Date.now()};
@@ -4706,7 +4767,16 @@
         if (!this.connected || !this.online) { showToast('Firebase офлайн','error'); return false; }
         if (!confirm('УВАГА: повне завантаження замінить онлайн-базу локальною копією. Продовжити?')) return false;
         if (!(await this.flush())) return false;
-        try { await this.rootRef.set(this.buildStructuredPayload()); return true; }
+        try {
+          const payload = this.buildStructuredPayload();
+          const result = await this.rootRef.transaction(current => {
+            const credential = readDirectorCredential(current?.meta) || readDirectorCredential(current) || readDirectorCredential(payload.meta);
+            if (!credential) return undefined;
+            return {...payload,meta:{...payload.meta,directorPasswordHash:credential}};
+          });
+          if (!result.committed) { showToast('Майстер-пароль відсутній. Повне завантаження скасовано.', 'error'); return false; }
+          return true;
+        }
         catch (e) { showToast('Помилка Firebase: ' + e.message,'error'); return false; }
       },
       async pullNow() {
@@ -4813,9 +4883,7 @@
         FirebaseSync.connect(db.firebaseConfig, true);
       }
 
-      if (db.cloudUpdateUrl && db.cloudAutoCheck !== false) {
-        setTimeout(() => CloudUpdater.checkForUpdates(true), 2500);
-      }
+      CloudUpdater.scheduleCheck();
     });
   </script>
 </body>
