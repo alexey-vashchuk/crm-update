@@ -390,7 +390,7 @@
     // =========================================================================
     // 0. APPLICATION VERSION & CLOUD UPDATE METADATA
     // =========================================================================
-    const APP_VERSION = '2.2.7';
+    const APP_VERSION = '2.2.8';
     const APP_BUILD_DATE = '2026-11-27';
     const STORAGE_KEY = 'sc_crm_db_v2';
 
@@ -704,16 +704,28 @@
       return `${moneyFormatter.format(n)} грн`;
     }
 
+    function getWorkQuantity(w) {
+      const n = Number(w?.qty);
+      return Number.isFinite(n) && n > 0 ? n : 1;
+    }
+
+    function getWorkLineTotal(w) {
+      if (!w || typeof w !== 'object') return 0;
+      if (w.price == null && w.total != null) return parseMoneyNumber(w.total);
+      return parseMoneyNumber(w.price ?? w.sum ?? w.cost ?? 0) * getWorkQuantity(w);
+    }
+
+    function getPartLineCost(w) {
+      if (w?.type !== 'part' || w.unitCost == null || w.unitCost === '') return null;
+      const n = Number(w.unitCost);
+      return Number.isFinite(n) && n >= 0 ? n * getWorkQuantity(w) : null;
+    }
+
     function getOrderTotal(order) {
       if (!order) return 0;
       const works = Array.isArray(order.works) ? order.works : toArrayFromFirebase(order.works);
       if (works.length > 0) {
-        return works.reduce((acc, w) => {
-          if (!w || typeof w !== 'object') return acc;
-          const qty = Number(w.qty) || 1;
-          const unit = parseMoneyNumber(w.price ?? w.sum ?? w.cost ?? w.total ?? 0);
-          return acc + (w.total !== undefined && w.price === undefined ? unit : unit * qty);
-        }, 0);
+        return works.reduce((acc, w) => acc + getWorkLineTotal(w), 0);
       }
       return parseMoneyNumber(order.totalPrice ?? order.total ?? 0);
     }
@@ -2194,6 +2206,7 @@
                     + Взяти орієнт. суму (${formatMoney(order.estimatedPrice)}) як підсумок
                   </button>
                 ` : ''}
+                <button type="button" onclick="openDirectPartModal('${escapeHtml(order.id)}')" class="px-3 py-1 rounded-lg bg-teal-50 hover:bg-teal-100 text-teal-800 font-semibold">${currentLang === 'ru' ? '+ Запчасть без склада' : '+ Запчастина без складу'}</button>
                 <button type="button" onclick="openAddPartToOrderModal('${escapeHtml(order.id)}')" class="px-3 py-1 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-800 font-semibold">
                   + Списати зі складу
                 </button>
@@ -2212,9 +2225,9 @@
                 <tbody class="divide-y divide-gray-100">
                   ${works.length === 0 ? `<tr><td colspan="4" class="py-3 text-center text-gray-400">Робіт ще не додано</td></tr>` : works.map((w, idx) => `
                     <tr>
-                      <td class="py-2 px-3 font-medium">${escapeHtml(w.title)}</td>
-                      <td class="py-2 px-3 text-gray-500">${w.type === 'part' ? 'Запчастина' : 'Робота'}</td>
-                      <td class="py-2 px-3 text-right font-semibold">${formatMoney(w.price ?? w.sum ?? w.cost ?? 0)}</td>
+                      <td class="py-2 px-3 font-medium">${escapeHtml(w.title)}${getWorkQuantity(w) !== 1 ? ` × ${getWorkQuantity(w)}` : ''}${w.type === 'part' ? `<div class="text-[10px] text-gray-400 font-normal">${currentLang === 'ru' ? 'Себестоимость' : 'Собівартість'}: ${getPartLineCost(w) === null ? '—' : formatMoney(getPartLineCost(w))}</div>` : ''}</td>
+                      <td class="py-2 px-3 text-gray-500">${w.type === 'part' ? (w.partId ? 'Запчастина · склад' : 'Запчастина · поза складом') : 'Робота'}</td>
+                      <td class="py-2 px-3 text-right font-semibold">${formatMoney(getWorkLineTotal(w))}</td>
                       <td class="py-2 px-3 text-right"><button type="button" onclick="removeOrderWork('${escapeHtml(order.id)}', ${idx})" class="text-red-500 hover:text-red-700 font-bold">✕</button></td>
                     </tr>
                   `).join('')}
@@ -2418,12 +2431,67 @@
       const order = (db.orders || []).find(o => String(o.id) === String(orderId));
       if (!order) return;
       if (!Array.isArray(order.works)) order.works = toArrayFromFirebase(order.works);
+      if (!Number.isInteger(idx) || idx < 0 || idx >= order.works.length) return;
       const removed = order.works.splice(idx, 1)[0];
+      const scopes = [['orders', orderId]];
       if (removed && removed.partId) {
-        const part = (db.parts || []).find(p => p.id === removed.partId);
-        if (part) part.qty = (Number(part.qty) || 0) + 1;
+        const part = (db.parts || []).find(p => String(p.id) === String(removed.partId));
+        if (part) {
+          part.qty = (Number(part.qty) || 0) + getWorkQuantity(removed);
+          scopes.push(['parts', part.id]);
+        }
       }
-      saveDB(false, [['orders', orderId], ['parts', removed?.partId || '__none__']]);
+      saveDB(false, scopes);
+      renderWorkspace();
+      openOrderModal(orderId);
+    }
+
+    function openDirectPartModal(orderId) {
+      const order = (db.orders || []).find(o => String(o.id) === String(orderId));
+      if (!order) return;
+      const ru = currentLang === 'ru';
+      const tr = (ua, r) => ru ? r : ua;
+      openModal(`
+        <form onsubmit="addDirectPart(event, '${escapeHtml(order.id)}')" class="p-6 space-y-4 text-xs">
+          <div class="flex items-center justify-between border-b border-gray-100 pb-3">
+            <h3 class="text-base font-bold">${tr('Запчастина без складу', 'Запчасть без склада')} · #${escapeHtml(order.id)}</h3>
+            <button type="button" onclick="openOrderModal('${escapeHtml(order.id)}')" class="text-gray-400 font-bold">✕</button>
+          </div>
+          <p class="text-gray-500">${tr('Запчастина додається лише до цього ремонту. Залишки складу не змінюються.', 'Запчасть добавляется только в этот ремонт. Остатки склада не меняются.')}</p>
+          <label class="block font-semibold">${tr('Назва запчастини', 'Название запчасти')}<input id="dp-title" required class="mt-1 w-full rounded-xl border border-gray-200 px-3 py-2" /></label>
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <label class="block font-semibold">${tr('Кількість', 'Количество')}<input id="dp-qty" type="number" min="1" step="1" required value="1" oninput="updateDirectPartTotal()" class="mt-1 w-full rounded-xl border border-gray-200 px-3 py-2" /></label>
+            <label class="block font-semibold">${tr('Ціна продажу / шт.', 'Цена продажи / шт.')}<input id="dp-price" type="number" min="0" step="0.01" required oninput="updateDirectPartTotal()" class="mt-1 w-full rounded-xl border border-gray-200 px-3 py-2" /></label>
+            <label class="block font-semibold">${tr('Закупівля / шт. (необов.)', 'Закупка / шт. (необяз.)')}<input id="dp-cost" type="number" min="0" step="0.01" class="mt-1 w-full rounded-xl border border-gray-200 px-3 py-2" /></label>
+          </div>
+          <div class="flex items-center justify-between rounded-xl bg-gray-50 p-3"><span>${tr('Сума для клієнта', 'Сумма для клиента')}</span><strong id="dp-total">${formatMoney(0)}</strong></div>
+          <p class="text-gray-500">${tr('Порожня закупівельна ціна означає невідому собівартість; 0 — без витрат.', 'Пустая закупочная цена означает неизвестную себестоимость; 0 — без затрат.')}</p>
+          <div class="flex justify-end gap-2"><button type="button" onclick="openOrderModal('${escapeHtml(order.id)}')" class="px-4 py-2 rounded-xl border border-gray-200">${tr('Назад','Назад')}</button><button type="submit" class="px-4 py-2 rounded-xl bg-[#1c6457] text-white font-semibold">${tr('Додати','Добавить')}</button></div>
+        </form>`, 'max-w-xl');
+    }
+
+    function updateDirectPartTotal() {
+      const qty = Number(document.getElementById('dp-qty').value);
+      const price = Number(document.getElementById('dp-price').value);
+      document.getElementById('dp-total').textContent = formatMoney(Number.isFinite(qty * price) ? qty * price : 0);
+    }
+
+    function addDirectPart(e, orderId) {
+      e.preventDefault();
+      const order = (db.orders || []).find(o => String(o.id) === String(orderId));
+      if (!order) return;
+      const title = document.getElementById('dp-title').value.trim();
+      const qty = Number(document.getElementById('dp-qty').value);
+      const priceRaw = document.getElementById('dp-price').value;
+      const price = Number(priceRaw);
+      const costRaw = document.getElementById('dp-cost').value;
+      const cost = Number(costRaw);
+      if (!title || !Number.isSafeInteger(qty) || qty < 1 || priceRaw === '' || !Number.isFinite(price) || price < 0 || !Number.isFinite(qty * price) || (costRaw !== '' && (!Number.isFinite(cost) || cost < 0 || !Number.isFinite(qty * cost)))) {
+        showToast(currentLang === 'ru' ? 'Проверьте название, количество и цены' : 'Перевірте назву, кількість та ціни', 'error'); return;
+      }
+      if (!Array.isArray(order.works)) order.works = toArrayFromFirebase(order.works);
+      order.works.push({ title, price, qty, type: 'part', ...(costRaw !== '' ? { unitCost: cost } : {}) });
+      saveDB(false, [['orders', orderId]]);
       renderWorkspace();
       openOrderModal(orderId);
     }
@@ -2466,7 +2534,9 @@
         title: part.name,
         price: Number(part.sellPrice) || 0,
         type: 'part',
-        partId: part.id
+        partId: part.id,
+        qty: 1,
+        ...(part.buyPrice != null && part.buyPrice !== '' && Number.isFinite(Number(part.buyPrice)) && Number(part.buyPrice) >= 0 ? { unitCost: Number(part.buyPrice) } : {})
       });
       saveDB(false, [['orders', orderId], ['parts', partId]]);
       renderWorkspace();
@@ -2622,7 +2692,7 @@
               <tbody>
                 ${works.length === 0
                   ? `<tr><td colspan="2" style="border:1px solid #444; padding:1.5mm 2mm;">Діагностика / обслуговування</td></tr>`
-                  : works.map(w => `<tr><td style="border:1px solid #444; padding:1.2mm 2mm;">${escapeHtml(w.title)}</td><td style="border:1px solid #444; padding:1.2mm 2mm; text-align:right;">${formatMoney(w.price ?? w.sum ?? w.cost ?? 0)}</td></tr>`).join('')}
+                  : works.map(w => `<tr><td style="border:1px solid #444; padding:1.2mm 2mm;">${escapeHtml(w.title)}${getWorkQuantity(w) !== 1 ? ` × ${getWorkQuantity(w)}` : ''}</td><td style="border:1px solid #444; padding:1.2mm 2mm; text-align:right;">${formatMoney(getWorkLineTotal(w))}</td></tr>`).join('')}
                 <tr>
                   <td style="border:1px solid #444; padding:1.5mm 2mm; text-align:right; font-weight:700;">РАЗОМ ДО СПЛАТИ:</td>
                   <td style="border:1px solid #444; padding:1.5mm 2mm; text-align:right; font-weight:800;">${formatMoney(total)}</td>
@@ -2829,7 +2899,7 @@
                       <span class="font-bold">#${escapeHtml(o.id)}</span> • <span class="font-semibold">${escapeHtml(o.device)}</span>
                       <div class="text-[11px] text-gray-500">${escapeHtml(o.problem || '')}</div>
                     </div>
-                    <span class="text-[11px] font-semibold text-teal-800">${escapeHtml(t((STATUS_META[o.status] || STATUS_META.new).labelKey))}</span>
+                    <div class="flex flex-col items-end gap-1.5 shrink-0"><span class="text-[11px] font-semibold text-teal-800">${escapeHtml(t((STATUS_META[o.status] || STATUS_META.new).labelKey))}</span><span class="font-semibold">${formatMoney(getOrderTotal(o))}</span><button type="button" onclick="event.stopPropagation(); openDirectPartModal('${escapeHtml(o.id)}')" class="px-2 py-1 rounded-lg bg-teal-50 text-teal-800 font-semibold">${currentLang === 'ru' ? '+ Запчасть без склада' : '+ Запчастина без складу'}</button></div>
                   </div>
                 `).join('')}
               </div>
@@ -3033,96 +3103,109 @@
       showToast('Запчастину видалено');
     }
 
-    // =========================================================================
-    // 15. ANALYTICS VIEW (MASTERS SALARY & COMPLETED ORDERS)
-    // =========================================================================
-    function renderAnalyticsView(ws) {
-      const issuedOrders = (db.orders || []).filter(o => o && !o.deleted && o.status === 'issued');
-      const rows = (db.employees || []).map(emp => {
-        const myOrders = issuedOrders.filter(o => String(o.masterId) === String(emp.id));
-        let worksSum = 0;
-        let totalSum = 0;
-        myOrders.forEach(o => {
-          const works = Array.isArray(o.works) ? o.works : toArrayFromFirebase(o.works);
-          let orderWorksVal = 0;
-          let orderTotalVal = 0;
-          works.forEach(w => {
-            const p = parseMoneyNumber(w.price ?? w.total ?? w.sum ?? w.cost ?? 0);
-            orderTotalVal += p;
-            if (w.type !== 'part') orderWorksVal += p;
-          });
-          if (orderTotalVal === 0) {
-            const fallback = getOrderTotal(o);
-            orderTotalVal = fallback;
-            orderWorksVal = fallback;
-          }
-          totalSum += orderTotalVal;
-          worksSum += orderWorksVal;
-        });
-
-        const sType = emp.salaryType || 'percent_works';
-        const sVal = Number(emp.salaryValue) || 0;
-        let earned = 0;
-        let schemeLabel = '';
-        if (sType === 'percent_works') {
-          earned = (worksSum * sVal) / 100;
-          schemeLabel = `${sVal}% від робіт`;
-        } else if (sType === 'percent_total') {
-          earned = (totalSum * sVal) / 100;
-          schemeLabel = `${sVal}% від загальної суми`;
-        } else if (sType === 'fixed_per_order') {
-          earned = myOrders.length * sVal;
-          schemeLabel = `${formatMoney(sVal)} / ремонт`;
-        } else {
-          earned = sVal;
-          schemeLabel = `Ставка ${formatMoney(sVal)}`;
-        }
-
-        return { emp, count: myOrders.length, worksSum, totalSum, earned, schemeLabel };
-      });
-
-      ws.innerHTML = `
-        <div class="space-y-4">
-          <div>
-            <h1 class="text-xl font-bold text-gray-900">${escapeHtml(t('analyticsTitle'))}</h1>
-            <p class="text-xs text-gray-500">${escapeHtml(t('analyticsSubtitle'))}</p>
-          </div>
-
-          <div class="bg-white rounded-2xl border border-gray-100 overflow-x-auto">
-            <table class="w-full text-left border-collapse text-xs">
-              <thead>
-                <tr class="border-b border-gray-100 bg-gray-50 text-[11px] uppercase text-gray-500">
-                  <th class="py-3 px-4">Співробітник</th>
-                  <th class="py-3 px-4">Посада</th>
-                  <th class="py-3 px-4">Видано ремонтів</th>
-                  <th class="py-3 px-4">Сума робіт</th>
-                  <th class="py-3 px-4">Загальна виручка</th>
-                  <th class="py-3 px-4">Схема оплати</th>
-                  <th class="py-3 px-4 text-right">Нараховано ЗП</th>
-                </tr>
-              </thead>
-              <tbody class="divide-y divide-gray-100">
-                ${rows.map(r => `
-                  <tr class="${!isEmployeeActive(r.emp) ? 'opacity-60 bg-gray-50/50' : ''}">
-                    <td class="py-3 px-4 font-bold text-gray-900">
-                      ${escapeHtml(r.emp.name)}
-                      ${!isEmployeeActive(r.emp) ? `<span class="ml-1.5 px-1.5 py-0.5 rounded bg-gray-200 text-gray-600 text-[10px] font-semibold">Вимкнений</span>` : ''}
-                    </td>
-                    <td class="py-3 px-4 text-gray-500">${r.emp.role === 'director' ? 'Директор' : 'Майстер'}</td>
-                    <td class="py-3 px-4 font-semibold">${r.count}</td>
-                    <td class="py-3 px-4">${formatMoney(r.worksSum)}</td>
-                    <td class="py-3 px-4">${formatMoney(r.totalSum)}</td>
-                    <td class="py-3 px-4 text-gray-500">${escapeHtml(r.schemeLabel)}</td>
-                    <td class="py-3 px-4 text-right font-extrabold text-emerald-700">${formatMoney(r.earned)}</td>
-                  </tr>
-                `).join('')}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      `;
+    // Calendar-period reporting. All branches; issue date is the recognition date.
+    const analyticsToday = new Date();
+    let analyticsPeriod = 'month', analyticsYear = analyticsToday.getFullYear(), analyticsMonth = analyticsToday.getMonth()+1;
+    let analyticsEmployee = 'all';
+    function analyticsRange(period, year, month) {
+      const start = period === 'year' ? 1 : period === 'quarter' ? Math.floor((month-1)/3)*3+1 : month;
+      const count = period === 'year' ? 12 : period === 'quarter' ? 3 : 1;
+      const iso = (y,m) => `${y}-${String(m).padStart(2,'0')}-01`;
+      const endDate = new Date(year, start-1+count, 1);
+      return {start:iso(year,start), end:iso(endDate.getFullYear(),endDate.getMonth()+1), months:count, startMonth:start};
     }
-
+    function analyticsSetPeriod(value) { if (['month','quarter','year'].includes(value)) analyticsPeriod=value; renderWorkspace(); }
+    function analyticsSetYear(value) { const y=Number(value); if(Number.isInteger(y)&&y>=1900&&y<=9998) analyticsYear=y; renderWorkspace(); }
+    function analyticsSetMonth(value) { const m=Number(value); if(Number.isInteger(m)&&m>=1&&m<=12) analyticsMonth=m; renderWorkspace(); }
+    function analyticsSetEmployee(value) { analyticsEmployee=value; renderWorkspace(); }
+    function analyticsShift(direction) {
+      const range=analyticsRange(analyticsPeriod,analyticsYear,analyticsMonth);
+      const date=new Date(analyticsYear,range.startMonth-1+direction*range.months,1);
+      if(date.getFullYear()>=1900&&date.getFullYear()<=9998){analyticsYear=date.getFullYear();analyticsMonth=date.getMonth()+1;} renderWorkspace();
+    }
+    function analyticsReset() { const now=new Date(); analyticsYear=now.getFullYear(); analyticsMonth=now.getMonth()+1; renderWorkspace(); }
+    function analyticsEmpty() { return {count:0,works:0,parts:0,unclassified:0,total:0,paid:0,unpaid:0,cost:0,unknownCost:0,partQty:0,stockQty:0,directQty:0}; }
+    function analyticsOrderMetrics(o) {
+      const m=analyticsEmpty(); m.count=1;
+      const lines=Array.isArray(o.works)?o.works:toArrayFromFirebase(o.works);
+      for(const w of lines) {
+        if(!w||typeof w!=='object') continue;
+        const amount=getWorkLineTotal(w);
+        if(w.type==='part') {
+          m.parts+=amount; const qty=getWorkQuantity(w); m.partQty+=qty;
+          if(w.partId) m.stockQty+=qty; else m.directQty+=qty;
+          const cost=getPartLineCost(w); if(cost===null) m.unknownCost++; else m.cost+=cost;
+        } else m.works+=amount;
+      }
+      m.total=getOrderTotal(o);
+      if(!lines.length) m.unclassified=m.total;
+      if(o.paid===true) m.paid=m.total; else m.unpaid=m.total;
+      return m;
+    }
+    function analyticsAdd(target,m) { for(const k of Object.keys(target)) target[k]+=m[k]; }
+    function analyticsCalculate(range, orders, employees) {
+      const service=analyticsEmpty(), unassigned=analyticsEmpty(), rows=new Map(), monthly=new Map();
+      for(const emp of employees) if(emp) rows.set(String(emp.id),{emp,metrics:analyticsEmpty()});
+      let missingDates=0;
+      for(const o of orders) {
+        if(!o||o.deleted||o.status!=='issued') continue;
+        const date=normalizeDateToIso(o.issuedDate);
+        // Validate calendar date as well as shape (legacy import may contain invalid dates).
+        const parsed=date?new Date(date+'T00:00:00Z'):null;
+        if(!parsed||!Number.isFinite(parsed.getTime())||parsed.toISOString().slice(0,10)!==date){missingDates++;continue;}
+        if(date<range.start||date>=range.end) continue;
+        const m=analyticsOrderMetrics(o); analyticsAdd(service,m);
+        const row=rows.get(String(o.masterId??'')); analyticsAdd(row?row.metrics:unassigned,m);
+        const key=date.slice(0,7); if(!monthly.has(key)) monthly.set(key,analyticsEmpty()); analyticsAdd(monthly.get(key),m);
+      }
+      return {service,unassigned,rows:[...rows.values()],monthly,missingDates};
+    }
+    function analyticsSalary(emp,m,months) {
+      const value=Math.max(0,Number(emp.salaryValue)||0), type=emp.salaryType||'percent_works';
+      if(type==='percent_works') return (m.works+m.unclassified)*value/100;
+      if(type==='percent_total') return m.total*value/100;
+      if(type==='fixed_per_order') return m.count*value;
+      // No employment dates or historical rates: inactive monthly salaries cannot be estimated reliably.
+      return isEmployeeActive(emp)?value*months:null;
+    }
+    function renderAnalyticsView(ws) {
+      const ru=currentLang==='ru', tr=(ua,r)=>ru?r:ua;
+      const range=analyticsRange(analyticsPeriod,analyticsYear,analyticsMonth);
+      const report=analyticsCalculate(range,db.orders||[],db.employees||[]), s=report.service;
+      const {rows,unassigned,monthly,missingDates}=report;
+      const money=formatMoney, fmt=n=>Number(n).toLocaleString(ru?'ru-RU':'uk-UA');
+      const salaryLabel=emp=>{const v=Number(emp.salaryValue)||0;return ({percent_works:`${v}% ${tr('від робіт','от работ')}`,percent_total:`${v}% ${tr('від суми','от суммы')}`,fixed_per_order:`${money(v)} / ${tr('ремонт','ремонт')}`,monthly_salary:`${money(v)} / ${tr('місяць','месяц')}`})[emp.salaryType||'percent_works']||money(v);};
+      const payroll=rows.map(r=>analyticsSalary(r.emp,r.metrics,range.months));
+      const payrollSum=payroll.reduce((a,b)=>a+(b??0),0), unknownSalary=payroll.some(x=>x===null);
+      const marginKnown=!s.unknownCost&&!s.unclassified;
+      const months=Array.from({length:12},(_,i)=>new Date(2020,i,1).toLocaleDateString(ru?'ru-RU':'uk-UA',{month:'long'}));
+      const end=new Date(range.end+'T12:00:00');end.setDate(end.getDate()-1);
+      const button='px-3 py-2 rounded-lg border border-gray-200 hover:bg-gray-50 font-semibold';
+      const tile=(label,value,note='')=>`<div class="bg-white border border-gray-100 rounded-xl p-4"><div class="text-xs text-gray-500">${label}</div><div class="mt-1 text-lg font-bold text-gray-900">${value}</div>${note?`<div class="text-[11px] text-gray-500 mt-1">${note}</div>`:''}</div>`;
+      const row=(name,m,scheme,earned)=>`<tr><td class="p-3 font-semibold">${name}</td><td class="p-3">${fmt(m.count)}</td><td class="p-3">${money(m.works)}</td><td class="p-3">${money(m.parts)}</td><td class="p-3">${money(m.unclassified)}</td><td class="p-3 font-semibold">${money(m.total)}</td><td class="p-3 text-gray-500">${scheme}</td><td class="p-3 text-right font-semibold">${earned===null?'—':money(earned)}</td></tr>`;
+      if(analyticsEmployee!=='all'&&!rows.some(r=>String(r.emp.id)===analyticsEmployee)) analyticsEmployee='all';
+      ws.innerHTML=`<div class="space-y-4 text-xs">
+        <div><h1 class="text-xl font-bold text-gray-900">${tr('Аналітика сервісного центру','Аналитика сервисного центра')}</h1><p class="text-gray-500 mt-1">${tr('Усі філії · видані ремонти за датою видачі','Все филиалы · выданные ремонты по дате выдачи')}</p></div>
+        <div class="bg-white rounded-xl p-3 border border-gray-100 flex flex-wrap items-end gap-2">
+          <label class="font-semibold">${tr('Період','Период')}<select class="block border rounded-lg p-2 mt-1 bg-white" onchange="analyticsSetPeriod(this.value)">${[['month',tr('Місяць','Месяц')],['quarter',tr('Квартал','Квартал')],['year',tr('Рік','Год')]].map(([v,l])=>`<option value="${v}" ${analyticsPeriod===v?'selected':''}>${l}</option>`).join('')}</select></label>
+          <label class="font-semibold">${tr('Рік','Год')}<input type="number" min="1900" max="9998" value="${analyticsYear}" onchange="analyticsSetYear(this.value)" class="block border rounded-lg p-2 mt-1 w-24" /></label>
+          ${analyticsPeriod==='year'?'':`<label class="font-semibold">${analyticsPeriod==='quarter'?tr('Квартал','Квартал'):tr('Місяць','Месяц')}<select class="block border rounded-lg p-2 mt-1 bg-white" onchange="analyticsSetMonth(this.value)">${(analyticsPeriod==='quarter'?[1,4,7,10].map((m,i)=>[m,`Q${i+1}`]):months.map((m,i)=>[i+1,m])).map(([m,l])=>`<option value="${m}" ${range.startMonth===m?'selected':''}>${l}</option>`).join('')}</select></label>`}
+          <button class="${button}" onclick="analyticsShift(-1)">‹</button><button class="${button}" onclick="analyticsShift(1)">›</button><button class="${button}" onclick="analyticsReset()">${tr('Поточний','Текущий')}</button>
+          <span class="ml-auto text-gray-600 font-semibold">${range.start} — ${end.getFullYear()}-${String(end.getMonth()+1).padStart(2,'0')}-${String(end.getDate()).padStart(2,'0')}</span>
+        </div>
+        <h2 class="text-sm font-bold">${tr('Звіт по всьому сервісу','Отчёт по всему сервису')}</h2>
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          ${tile(tr('Видано ремонтів','Выдано ремонтов'),fmt(s.count))}${tile(tr('Загальна сума виданих','Общая сумма выданных'),money(s.total))}${tile(tr('Роботи','Работы'),money(s.works))}${tile(tr('Запчастини','Запчасти'),money(s.parts),`${fmt(s.partQty)} ${tr('шт.','шт.')} · ${tr('зі складу','со склада')}: ${fmt(s.stockQty)} · ${tr('поза складом','вне склада')}: ${fmt(s.directQty)}`)}
+          ${tile(tr('Позначено оплаченими','Отмечено оплаченными'),money(s.paid))}${tile(tr('Не позначено оплаченими','Не отмечено оплаченными'),money(s.unpaid))}${tile(tr('Відома собівартість запчастин','Известная себестоимость запчастей'),money(s.cost),s.unknownCost?`${s.unknownCost} ${tr('позицій без собівартості','позиций без себестоимости')}`:'')}${tile(tr('Розрахункова ЗП','Расчётная ЗП'),money(payrollSum),unknownSalary?tr('Без невідомих ставок неактивних','Без неизвестных ставок неактивных'):'')}
+          ${tile(tr('Без розподілу на роботи/деталі','Без разбивки на работы/детали'),money(s.unclassified))}${tile(tr('Виручка мінус закупівля','Выручка минус закупка'),marginKnown?money(s.total-s.cost):'—',tr('Без інших витрат; не чистий прибуток','Без прочих расходов; не чистая прибыль'))}${tile(tr('Після закупівлі та розрах. ЗП','После закупки и расч. ЗП'),marginKnown&&!unknownSalary?money(s.total-s.cost-payrollSum):'—',tr('Без оренди, податків та інших витрат','Без аренды, налогов и прочих расходов'))}
+        </div>
+        <p class="text-gray-500">${tr('Видача ≠ дата оплати. Суми оплати визначені за поточною позначкою «сплачено», а не за рухом коштів. Старі записи без розбивки враховані як роботи лише для розрахунку відсоткової ЗП за старою логікою.','Выдача ≠ дата оплаты. Суммы оплаты определены по текущей отметке «оплачено», а не по движению денег. Старые записи без разбивки учтены как работы только для расчёта процентной ЗП по старой логике.')}${missingDates?` ${tr('Виключено виданих ремонтів без коректної дати (за весь час):','Исключено выданных ремонтов без корректной даты (за всё время):')} ${missingDates}.`:''}</p>
+        <div class="flex flex-wrap items-center justify-between gap-2"><h2 class="text-sm font-bold">${tr('Звіт по співробітниках','Отчёт по сотрудникам')}</h2><select class="border rounded-lg p-2 bg-white" onchange="analyticsSetEmployee(this.value)"><option value="all">${tr('Усі співробітники','Все сотрудники')}</option>${rows.map(r=>`<option value="${escapeHtml(r.emp.id)}" ${String(r.emp.id)===analyticsEmployee?'selected':''}>${escapeHtml(r.emp.name)}</option>`).join('')}</select></div>
+        <div class="bg-white rounded-xl border border-gray-100 overflow-x-auto"><table class="w-full text-left whitespace-nowrap"><thead class="bg-gray-50 text-gray-500"><tr>${[tr('Співробітник','Сотрудник'),tr('Видано','Выдано'),tr('Роботи','Работы'),tr('Запчастини','Запчасти'),tr('Без розбивки','Без разбивки'),tr('Виручка','Выручка'),tr('Схема ЗП','Схема ЗП'),tr('Розрах. ЗП','Расч. ЗП')].map(x=>`<th class="p-3">${x}</th>`).join('')}</tr></thead><tbody class="divide-y divide-gray-100">${rows.filter(r=>analyticsEmployee==='all'||String(r.emp.id)===analyticsEmployee).map(r=>row(escapeHtml(r.emp.name)+(isEmployeeActive(r.emp)?'':` <span class="text-gray-400">(${tr('неактивний','неактивный')})</span>`),r.metrics,escapeHtml(salaryLabel(r.emp)),analyticsSalary(r.emp,r.metrics,range.months))).join('')}${analyticsEmployee==='all'&&unassigned.count?row(tr('Без майстра / невідомий майстер','Без мастера / неизвестный мастер'),unassigned,'—',null):''}</tbody></table></div>
+        <p class="text-gray-500">${tr('ЗП — оцінка за поточними ставками за весь обраний календарний період, без історії ставок, табеля та фактичних виплат. Місячна ставка × кількість місяців. Для неактивних з місячною ставкою сума невідома.','ЗП — оценка по текущим ставкам за весь выбранный календарный период, без истории ставок, табеля и фактических выплат. Месячная ставка × количество месяцев. Для неактивных с месячной ставкой сумма неизвестна.')}</p>
+        ${range.months>1?`<h2 class="text-sm font-bold">${tr('Динаміка сервісу за місяцями','Динамика сервиса по месяцам')}</h2><div class="bg-white border border-gray-100 rounded-xl overflow-x-auto"><table class="w-full text-left whitespace-nowrap"><thead class="bg-gray-50 text-gray-500"><tr>${[tr('Місяць','Месяц'),tr('Видано','Выдано'),tr('Роботи','Работы'),tr('Запчастини','Запчасти'),tr('Виручка','Выручка')].map(x=>`<th class="p-3">${x}</th>`).join('')}</tr></thead><tbody class="divide-y divide-gray-100">${Array.from({length:range.months},(_,i)=>{const m=range.startMonth+i,key=`${analyticsYear}-${String(m).padStart(2,'0')}`,a=monthly.get(key)||analyticsEmpty();return `<tr><td class="p-3">${months[m-1]}</td><td class="p-3">${a.count}</td><td class="p-3">${money(a.works)}</td><td class="p-3">${money(a.parts)}</td><td class="p-3 font-semibold">${money(a.total)}</td></tr>`;}).join('')}</tbody></table></div>`:''}
+      </div>`;
+    }
     // =========================================================================
     // 16. COMPANY & STAFF VIEW (DIRECTOR ONLY)
     // =========================================================================
