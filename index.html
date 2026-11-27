@@ -156,6 +156,11 @@
         padding-right: 0.5rem;
       }
     }
+
+    .receipt-editor-columns { display:grid;grid-template-columns:minmax(0,1fr);gap:1rem;align-items:start; }
+    @media(min-width:1000px){.receipt-editor-columns{grid-template-columns:minmax(0,1fr) minmax(0,1.15fr)} .receipt-preview-panel{position:sticky;top:0}}
+    #rt-preview-scroll {max-height:75vh;padding:4px;overscroll-behavior:contain;}
+    #print-area.receipt-print-ready {display:block;position:fixed;left:-100000px;top:0;visibility:hidden;}
   </style>
   <style id="dynamic-print-style"></style>
 </head>
@@ -390,7 +395,7 @@
     // =========================================================================
     // 0. APPLICATION VERSION & CLOUD UPDATE METADATA
     // =========================================================================
-    const APP_VERSION = '2.2.8';
+    const APP_VERSION = '2.2.11';
     const APP_BUILD_DATE = '2026-11-27';
     const STORAGE_KEY = 'sc_crm_db_v2';
 
@@ -680,6 +685,27 @@
       return '';
     }
 
+    // Read both current and imported issue dates without rewriting the database.
+    function getOrderIssuedDate(order) {
+      if (!order) return '';
+      for (const value of [order.issuedDate, order.issueDate, order.issuedAt, order.issuedTimestamp]) {
+        if (value == null || value === '') continue;
+        const raw = String(value).trim();
+        let iso = '';
+        if (/^\\d{10}$|^\\d{13}$/.test(raw)) {
+          const ms = Number(raw) * (raw.length === 10 ? 1000 : 1);
+          const timestamp = new Date(ms);
+          if (Number.isFinite(timestamp.getTime())) iso = timestamp.toISOString().slice(0,10);
+        } else {
+          iso = normalizeDateToIso(value);
+        }
+        if (!iso) continue;
+        const date = new Date(iso + 'T00:00:00Z');
+        if (Number.isFinite(date.getTime()) && date.toISOString().slice(0,10) === iso) return iso;
+      }
+      return '';
+    }
+
     function addDaysToIsoDate(isoDate, days) {
       const norm = normalizeDateToIso(isoDate);
       if (!norm) return '';
@@ -839,8 +865,10 @@
       }
       db.receiptTemplates.intake = { ...defaults.intake, ...(db.receiptTemplates.intake || {}) };
       db.receiptTemplates.issue = { ...defaults.issue, ...(db.receiptTemplates.issue || {}) };
-      if (!Array.isArray(db.receiptTemplates.intake.images)) db.receiptTemplates.intake.images = [];
-      if (!Array.isArray(db.receiptTemplates.issue.images)) db.receiptTemplates.issue.images = [];
+      for (const tab of ['intake','issue']) {
+        const tpl = db.receiptTemplates[tab];
+        tpl.images = (Array.isArray(tpl.images) ? tpl.images : tpl.images && typeof tpl.images === 'object' ? Object.values(tpl.images) : []).filter(img => img && typeof img === 'object');
+      }
     }
 
     function getPaperDimensions(tpl) {
@@ -1602,7 +1630,7 @@
       if (!order) return '';
       if (warrantyCache.has(order)) return warrantyCache.get(order);
       const directIso = normalizeDateToIso(order.warrantyUntil ?? order.warrantyEnd ?? order.warrantyDate ?? '');
-      const normIssued = normalizeDateToIso(order.issuedDate ?? order.issueDate ?? '');
+      const normIssued = getOrderIssuedDate(order);
       const wDays = Math.max(0, Number(order.warrantyDays ?? order.guaranteeDays ?? 0) || 0);
 
       if (normIssued && wDays > 0) {
@@ -1709,8 +1737,8 @@
         } else if (ordersSortField === 'status') {
           cmp = orderCollator.compare(String(a.status || ''), String(b.status || ''));
         } else if (ordersSortField === 'warrantyUntil') {
-          const da = getWarrantyUntilDate(a) || normalizeDateToIso(a.issuedDate) || a.deadline || '';
-          const dbDate = getWarrantyUntilDate(b) || normalizeDateToIso(b.issuedDate) || b.deadline || '';
+          const da = getWarrantyUntilDate(a) || getOrderIssuedDate(a) || a.deadline || '';
+          const dbDate = getWarrantyUntilDate(b) || getOrderIssuedDate(b) || b.deadline || '';
           cmp = String(da).localeCompare(String(dbDate));
         }
         return ordersSortDir === 'asc' ? cmp : -cmp;
@@ -1827,7 +1855,7 @@
       const rowBg = order.approved && order.status !== 'issued' ? 'bg-emerald-50/60 hover:bg-emerald-50' : 'hover:bg-gray-50/80';
       const warrantyUntil = getWarrantyUntilDate(order);
       const activeWarranty = isOrderOnWarranty(order);
-      const normIssued = normalizeDateToIso(order.issuedDate) || order.issuedDate || '';
+      const normIssued = getOrderIssuedDate(order);
       const isGlobalTabSearch = Boolean(ordersSearch.trim());
       let tabBadge = '';
       if (isGlobalTabSearch) {
@@ -2108,7 +2136,7 @@
       const isIssued = order.status === 'issued';
       const warrantyUntil = getWarrantyUntilDate(order);
       const activeWarranty = isOrderOnWarranty(order);
-      const normIssuedForInput = normalizeDateToIso(order.issuedDate) || getTodayPrefix();
+      const normIssuedForInput = getOrderIssuedDate(order);
 
       openModal(`
         <div class="p-5 sm:p-6 space-y-4 max-h-[92vh] overflow-y-auto text-xs">
@@ -2182,7 +2210,7 @@
             </div>
             <div class="p-3 rounded-xl bg-white border border-gray-200 space-y-1.5">
               <div class="text-[11px] font-semibold text-gray-500">Комплектація / зовнішній стан</div>
-              <div class="text-gray-800">${escapeHtml(order.completeness || '—')}</div>
+              <textarea rows="2" aria-label="Комплектація" placeholder="Комплектація / зовнішній стан" onchange="updateOrderCompleteness('${escapeHtml(order.id)}', this.value)" class="w-full rounded-lg border border-gray-200 px-2 py-1 text-gray-800">${escapeHtml(order.completeness || '')}</textarea>
               <div class="pt-1 border-t border-gray-100 flex items-center justify-between gap-2">
                 <span class="text-[11px] text-gray-500">Орієнтовна сума:</span>
                 <input type="number" min="0" step="1" value="${Number(order.estimatedPrice) || 0}" onchange="updateOrderEstimatedPrice('${escapeHtml(order.id)}', this.value)" class="w-28 rounded-lg border border-gray-200 px-2 py-1 text-right font-semibold text-gray-800" />
@@ -2225,10 +2253,10 @@
                 <tbody class="divide-y divide-gray-100">
                   ${works.length === 0 ? `<tr><td colspan="4" class="py-3 text-center text-gray-400">Робіт ще не додано</td></tr>` : works.map((w, idx) => `
                     <tr>
-                      <td class="py-2 px-3 font-medium">${escapeHtml(w.title)}${getWorkQuantity(w) !== 1 ? ` × ${getWorkQuantity(w)}` : ''}${w.type === 'part' ? `<div class="text-[10px] text-gray-400 font-normal">${currentLang === 'ru' ? 'Себестоимость' : 'Собівартість'}: ${getPartLineCost(w) === null ? '—' : formatMoney(getPartLineCost(w))}</div>` : ''}</td>
+                      <td class="py-2 px-3 font-medium">${escapeHtml(w.title || w.name || '—')}${getWorkQuantity(w) !== 1 ? ` × ${getWorkQuantity(w)}` : ''}${w.type === 'part' ? `<div class="text-[10px] text-gray-400 font-normal">${currentLang === 'ru' ? 'Себестоимость' : 'Собівартість'}: ${getPartLineCost(w) === null ? '—' : formatMoney(getPartLineCost(w))}</div>` : ''}</td>
                       <td class="py-2 px-3 text-gray-500">${w.type === 'part' ? (w.partId ? 'Запчастина · склад' : 'Запчастина · поза складом') : 'Робота'}</td>
                       <td class="py-2 px-3 text-right font-semibold">${formatMoney(getWorkLineTotal(w))}</td>
-                      <td class="py-2 px-3 text-right"><button type="button" onclick="removeOrderWork('${escapeHtml(order.id)}', ${idx})" class="text-red-500 hover:text-red-700 font-bold">✕</button></td>
+                      <td class="py-2 px-3 text-right whitespace-nowrap"><button type="button" title="Редагувати" onclick="openEditOrderWorkModal('${escapeHtml(order.id)}', ${idx})" class="text-teal-700 hover:underline font-semibold mr-2">${currentLang === 'ru' ? 'Изм.' : 'Змін.'}</button><button type="button" onclick="removeOrderWork('${escapeHtml(order.id)}', ${idx})" class="text-red-500 hover:text-red-700 font-bold">✕</button></td>
                     </tr>
                   `).join('')}
                 </tbody>
@@ -2252,7 +2280,7 @@
                 🖨 Квитанція видачі
               </button>
               ${isDirector() ? `
-                <button type="button" onclick="openReceiptEditorModal('issue')" class="px-2.5 py-2 rounded-xl border border-gray-200 hover:bg-gray-50 text-gray-500" title="Налаштувати шаблон квитанції">⚙</button>
+                <button type="button" onclick="openReceiptEditorModal('issue', '${escapeHtml(order.id)}')" class="px-2.5 py-2 rounded-xl border border-gray-200 hover:bg-gray-50 text-gray-500" title="Налаштувати шаблон квитанції">⚙</button>
               ` : ''}
             </div>
 
@@ -2330,7 +2358,7 @@
       if (!order) return;
       order.status = newStatus;
       if (newStatus === 'issued') {
-        const normIssued = normalizeDateToIso(order.issuedDate) || getTodayPrefix();
+        const normIssued = getOrderIssuedDate(order) || getTodayPrefix();
         order.issuedDate = normIssued;
         const wDays = Math.max(0, Number(order.warrantyDays ?? db.defaultWarrantyDays ?? 30));
         order.warrantyDays = wDays;
@@ -2363,6 +2391,13 @@
       openOrderModal(orderId);
     }
 
+    function updateOrderCompleteness(orderId, val) {
+      const order = (db.orders || []).find(o => String(o.id) === String(orderId));
+      if (!order || order.completeness === val) return;
+      order.completeness = String(val || '');
+      saveDB(false, [['orders', orderId]]);
+    }
+
     function updateOrderDescription(orderId, val) {
       const order = (db.orders || []).find(o => String(o.id) === String(orderId));
       if (!order) return;
@@ -2375,7 +2410,7 @@
       if (!order) return;
       const d = Math.max(0, Number(daysVal) || 0);
       order.warrantyDays = d;
-      const normIssued = normalizeDateToIso(order.issuedDate);
+      const normIssued = getOrderIssuedDate(order);
       if (order.status === 'issued' && normIssued) {
         order.issuedDate = normIssued;
         order.warrantyUntil = d > 0 ? addDaysToIsoDate(normIssued, d) : '';
@@ -2400,9 +2435,10 @@
     function markOrderPaidAndIssued(orderId) {
       const order = (db.orders || []).find(o => String(o.id) === String(orderId));
       if (!order) return;
+      const existingIssueDate = order.status === 'issued' ? getOrderIssuedDate(order) : '';
       order.paid = true;
       order.status = 'issued';
-      order.issuedDate = getTodayPrefix();
+      order.issuedDate = existingIssueDate || getTodayPrefix();
       const wDays = Math.max(0, Number(order.warrantyDays ?? db.defaultWarrantyDays ?? 30));
       order.warrantyDays = wDays;
       order.warrantyUntil = wDays > 0 ? addDaysToIsoDate(order.issuedDate, wDays) : '';
@@ -2616,6 +2652,65 @@
       showToast(`Замовлення #${orderId} видалено остаточно`);
     }
 
+
+    // Edit in place, preserving the original inventory link and unrelated fields.
+    let orderWorkEdit = null;
+    function openEditOrderWorkModal(orderId, idx) {
+      const order = (db.orders || []).find(o => String(o.id) === String(orderId));
+      const w = order && (Array.isArray(order.works) ? order.works : toArrayFromFirebase(order.works))[idx];
+      if (!w) return;
+      const qty = getWorkQuantity(w), isPart = w.type === 'part', linked = isPart && !!w.partId;
+      const stock = linked ? (db.parts || []).find(p => String(p.id) === String(w.partId)) : null;
+      const ru = currentLang === 'ru', tr = (a,b) => ru ? b : a;
+      orderWorkEdit = {id:String(orderId), idx, fingerprint:JSON.stringify(w)};
+      openModal(`
+        <form onsubmit="submitEditOrderWork(event)" class="p-6 space-y-4 text-xs">
+          <h3 class="text-base font-bold">${tr('Редагування позиції','Редактирование позиции')} · #${escapeHtml(orderId)}</h3>
+          ${linked ? `<p class="text-gray-500">${stock ? tr('Залишок на складі: ','Остаток на складе: ') + escapeHtml(stock.qty) : tr('Позиції немає на складі. Кількість заблокована.','Позиции нет на складе. Количество заблокировано.')}</p>` : ''}
+          ${order.paid ? `<p class="text-amber-800 bg-amber-50 p-2 rounded">${tr('Ремонт оплачено. Зміна суми змінить фінансовий звіт; позначка оплати залишиться.','Ремонт оплачен. Изменение суммы изменит финансовый отчёт; отметка оплаты сохранится.')}</p>` : ''}
+          <label class="block font-semibold">${tr('Назва','Название')}<input id="ew-title" required value="${escapeHtml(w.title || w.name || '')}" class="mt-1 w-full border rounded-lg px-3 py-2" /></label>
+          <div class="grid grid-cols-2 gap-3">
+          <label>${tr('Кількість','Количество')}<input id="ew-qty" type="number" min="1" step="1" required ${linked && !stock ? 'readonly' : ''} value="${qty}" class="mt-1 w-full border rounded-lg px-3 py-2" /></label>
+          <label>${tr('Ціна за одиницю','Цена за единицу')}<input id="ew-price" type="number" min="0" step="any" required value="${getWorkLineTotal(w)/qty}" class="mt-1 w-full border rounded-lg px-3 py-2" /></label>
+          </div>
+          ${isPart ? `<label class="block">${tr('Закупка за одиницю (необов’язково)','Закупка за единицу (необязательно)')}<input id="ew-cost" type="number" min="0" step="any" value="${getPartLineCost(w) === null ? '' : Number(w.unitCost)}" class="mt-1 w-full border rounded-lg px-3 py-2" /></label>` : ''}
+          <div class="flex justify-end gap-2"><button type="button" onclick="openOrderModal('${escapeHtml(orderId)}')" class="border rounded-lg px-4 py-2">${tr('Скасувати','Отмена')}</button><button class="bg-[#1c6457] text-white rounded-lg px-4 py-2" type="submit">${tr('Зберегти','Сохранить')}</button></div>
+        </form>`, 'max-w-lg');
+    }
+    function editOrderWork(orderId, idx, fingerprint, values) {
+      const order = (db.orders || []).find(o => String(o.id) === String(orderId));
+      const works = order && (Array.isArray(order.works) ? order.works : toArrayFromFirebase(order.works));
+      const w = works && works[idx];
+      if (!w || JSON.stringify(w) !== fingerprint) return 'Позицію змінено на іншому ПК. Відкрийте ремонт повторно.';
+      const title = String(values.title || '').trim(), qty = Number(values.qty), price = Number(values.price);
+      const cost = values.cost == null || values.cost === '' ? null : Number(values.cost);
+      if (!title || !Number.isSafeInteger(qty) || qty < 1 || values.price === '' || !Number.isFinite(price) || price < 0 || (cost !== null && (!Number.isFinite(cost) || cost < 0))) return 'Перевірте назву, кількість та ціни.';
+      const delta = qty - getWorkQuantity(w), scopes = [['orders',orderId]];
+      if (w.type === 'part' && w.partId && delta !== 0) {
+        const stock = (db.parts || []).find(p => String(p.id) === String(w.partId));
+        if (!stock) return 'Запчастина відсутня на складі. Кількість змінити неможливо.';
+        const available = Number(stock.qty) || 0;
+        if (delta > available) return 'Недостатньо запчастин на складі.';
+        stock.qty = available - delta;
+        scopes.push(['parts',stock.id]);
+      }
+      const next = {...w,title,qty,price};
+      if ('name' in next) next.name = title;
+      // Canonical unit price supersedes legacy line totals and alternative prices.
+      delete next.total; delete next.sum; delete next.cost;
+      if (w.type === 'part') { if (cost === null) delete next.unitCost; else next.unitCost = cost; }
+      works[idx] = next; order.works = works;
+      saveDB(false, scopes);
+      return '';
+    }
+    function submitEditOrderWork(e) {
+      e.preventDefault();
+      if (!orderWorkEdit) return;
+      const {id,idx,fingerprint} = orderWorkEdit;
+      const error = editOrderWork(id,idx,fingerprint,{title:document.getElementById('ew-title').value,qty:document.getElementById('ew-qty').value,price:document.getElementById('ew-price').value,cost:document.getElementById('ew-cost')?.value});
+      if (error) return showToast(error,'error');
+      orderWorkEdit = null; renderWorkspace(); openOrderModal(id); showToast('Позицію оновлено!');
+    }
     // =========================================================================
     // 12. RECEIPT RENDERING & PRINTING (TOP-LEFT ANCHORED + WARRANTY DATE FIX)
     // =========================================================================
@@ -2625,7 +2720,7 @@
       const wDays = Math.max(0, Number(order.warrantyDays ?? db.defaultWarrantyDays ?? 0) || 0);
       let warrantyUntil = getWarrantyUntilDate(order);
       if (!warrantyUntil && wDays > 0) {
-        const baseDate = normalizeDateToIso(order.issuedDate) || getTodayPrefix();
+        const baseDate = getOrderIssuedDate(order) || (order.status === 'issued' ? '' : getTodayPrefix());
         warrantyUntil = addDaysToIsoDate(baseDate, wDays);
       }
       return String(text || '')
@@ -2652,20 +2747,22 @@
       const footer = applyReceiptPlaceholders(tpl.footerText, order);
       const bodyTerms = applyReceiptPlaceholders(isIntake ? tpl.termsText : tpl.warrantyText, order);
 
-      const imagesHtml = (tpl.images || []).map(img => `
-        <img src="${img.dataUrl}" style="position:absolute; left:${Number(img.xPct) || 0}%; top:${Number(img.yPct) || 0}%; width:${Number(img.widthMm) || 25}mm; opacity:${img.opacity ?? 1}; pointer-events:none; z-index:10;" />
-      `).join('');
+      if (tpl.layout === 'classic') return renderClassicReceipt(order, type, tpl);
+      const imagesHtml = receiptOverlayImages(tpl);
+      const logoHtml = receiptLogoImages(tpl);
+
 
       return `
-        <div style="position:relative; box-sizing:border-box; padding:${Number(tpl.marginMm) || 8}mm; font-size:${Number(tpl.fontSizePt) || 10}pt; line-height:1.35; color:#111; font-family:'Inter','Segoe UI',Roboto,'DejaVu Sans',sans-serif;">
+        <div style="position:relative; box-sizing:border-box; padding:${receiptNumber(tpl.marginMm, 0, 30, 8)}mm; font-size:${Number(tpl.fontSizePt) || 10}pt; line-height:1.35; color:#111; font-family:'Inter','Segoe UI',Roboto,'DejaVu Sans',sans-serif;">
           ${imagesHtml}
+          ${logoHtml ? `<div style="text-align:left;margin-bottom:2mm;">${logoHtml}</div>` : ''}
           ${header ? `<div style="text-align:center; font-weight:700; margin-bottom:2mm;">${escapeHtml(header)}</div>` : ''}
           <div style="text-align:center; font-weight:800; font-size:1.15em; border-bottom:1.5px solid #111; padding-bottom:2mm; margin-bottom:3mm;">
             ${escapeHtml(title)}
           </div>
 
           <div style="display:flex; justify-content:space-between; flex-wrap:wrap; gap:4px; margin-bottom:3mm; font-size:0.9em;">
-            <div><strong>Дата:</strong> ${escapeHtml(isIntake ? (order.createdAt || getTodayPrefix()) : (normalizeDateToIso(order.issuedDate) || order.issuedDate || getTodayPrefix()))}</div>
+            <div><strong>Дата:</strong> ${escapeHtml(isIntake ? (order.createdAt || getTodayPrefix()) : (getOrderIssuedDate(order) || (order.status === 'issued' ? '—' : getTodayPrefix())))}</div>
             ${tpl.showBranch && branch.name ? `<div><strong>Точка:</strong> ${escapeHtml(branch.name)}</div>` : ''}
             ${tpl.showCompanyPhone && (branch.phone || db.companyPhone) ? `<div><strong>Тел.:</strong> ${escapeHtml(branch.phone || db.companyPhone)}</div>` : ''}
             ${tpl.showCompanyAddress && (branch.address || db.companyAddress) ? `<div><strong>Адреса:</strong> ${escapeHtml(branch.address || db.companyAddress)}</div>` : ''}
@@ -2692,7 +2789,7 @@
               <tbody>
                 ${works.length === 0
                   ? `<tr><td colspan="2" style="border:1px solid #444; padding:1.5mm 2mm;">Діагностика / обслуговування</td></tr>`
-                  : works.map(w => `<tr><td style="border:1px solid #444; padding:1.2mm 2mm;">${escapeHtml(w.title)}${getWorkQuantity(w) !== 1 ? ` × ${getWorkQuantity(w)}` : ''}</td><td style="border:1px solid #444; padding:1.2mm 2mm; text-align:right;">${formatMoney(getWorkLineTotal(w))}</td></tr>`).join('')}
+                  : works.map(w => `<tr><td style="border:1px solid #444; padding:1.2mm 2mm;">${escapeHtml(w.title || w.name || '—')}${getWorkQuantity(w) !== 1 ? ` × ${getWorkQuantity(w)}` : ''}</td><td style="border:1px solid #444; padding:1.2mm 2mm; text-align:right;">${formatMoney(getWorkLineTotal(w))}</td></tr>`).join('')}
                 <tr>
                   <td style="border:1px solid #444; padding:1.5mm 2mm; text-align:right; font-weight:700;">РАЗОМ ДО СПЛАТИ:</td>
                   <td style="border:1px solid #444; padding:1.5mm 2mm; text-align:right; font-weight:800;">${formatMoney(total)}</td>
@@ -2747,11 +2844,13 @@
       printArea.style.marginLeft = '0';
       printArea.style.marginRight = 'auto';
       printArea.style.marginTop = `${offsetTop}mm`;
-      const singleHtml = renderSingleReceiptCopyHtml(order, type, tpl);
-      printArea.innerHTML = copies === 2
-        ? `${singleHtml}<div style="border-top:1px dashed #000; margin:2mm 0;"></div>${singleHtml}`
-        : singleHtml;
+      printArea.innerHTML = renderReceiptCopies(order, type, tpl);
 
+      // Wait for embedded raster images before invoking Electron or browser printing.
+      printArea.classList.add('receipt-print-ready');
+      try { await Promise.all(Array.from(printArea.querySelectorAll('img')).map(img => typeof img.decode === 'function' ? img.decode() : Promise.resolve())); }
+      catch (err) { showToast('Не вдалося підготувати зображення квитанції. Перевірте шаблон.', 'error'); return; }
+      finally { printArea.classList.remove('receipt-print-ready'); }
       const targetPrinter = tpl.printerName || db.defaultPrinterName || '';
       if (StorageEngine.isElectron && db.silentPrintEnabled && window.electronAPI.silentPrint) {
         const res = await window.electronAPI.silentPrint({ deviceName: targetPrinter, landscape: printLandscape });
@@ -2766,6 +2865,54 @@
     function printIntakeReceipt(orderId) { printReceipt(orderId, 'intake'); }
     function printIssueReceipt(orderId) { printReceipt(orderId, 'issue'); }
 
+
+    function receiptNumber(value, min, max, fallback) {
+      const n = value === '' || value == null ? NaN : Number(value);
+      return Number.isFinite(n) ? Math.max(min, Math.min(max,n)) : fallback;
+    }
+    function receiptImageSource(img) {
+      const value = String(img?.dataUrl || '');
+      return /^data:image\/(?:png|jpeg|jpg|webp|gif|bmp);base64,[A-Za-z0-9+/=]+$/i.test(value) ? value : '';
+    }
+    function receiptImageHtml(img, overlay) {
+      const src = receiptImageSource(img); if (!src) return '';
+      const width = receiptNumber(img.widthMm,5,150,25), opacity = receiptNumber(img.opacity,0,1,1);
+      return `<img alt="" src="${escapeHtml(src)}" style="${overlay ? `position:absolute;left:${receiptNumber(img.xPct,0,95,0)}%;top:${receiptNumber(img.yPct,0,95,0)}%;z-index:2;` : 'display:inline-block;vertical-align:middle;'}width:${width}mm;max-width:${overlay?'none':'100%'};height:auto;opacity:${opacity};pointer-events:none;" />`;
+    }
+    function receiptOverlayImages(tpl) { return (tpl.images || []).filter(img=>img.placement !== 'logo').map(img=>receiptImageHtml(img,true)).join(''); }
+    function receiptLogoImages(tpl) { return (tpl.images || []).filter(img=>img.placement === 'logo').map(img=>receiptImageHtml(img,false)).join(''); }
+    function receiptDisplayDate(value) { const iso = normalizeDateToIso(value); return iso ? iso.split('-').reverse().join('.') : '—'; }
+    function renderClassicReceipt(order,type,tpl) {
+      const intake = type === 'intake';
+      const branch = (db.branches || []).find(b=>String(b.id)===String(order.branchId)) || {};
+      const works = Array.isArray(order.works) ? order.works : toArrayFromFirebase(order.works);
+      const parts = works.filter(w=>w.type === 'part'); const services = works.filter(w=>w.type !== 'part');
+      const total = getOrderTotal(order), partTotal = parts.reduce((a,w)=>a+getWorkLineTotal(w),0);
+      const logo = receiptLogoImages(tpl), dims = getPaperDimensions(tpl), wide = dims.widthMm >= 140;
+      const title = applyReceiptPlaceholders(tpl.docTitle,order), header = applyReceiptPlaceholders(tpl.headerText,order);
+      const terms = applyReceiptPlaceholders(intake ? tpl.termsText : tpl.warrantyText,order), footer = applyReceiptPlaceholders(tpl.footerText,order);
+      const date = intake ? normalizeDateToIso(order.createdAt) : getOrderIssuedDate(order);
+      const field = (name,value) => `<tr><td style="width:30%;padding:.6mm 1mm .6mm 0;vertical-align:top">${escapeHtml(name)}</td><td style="border-bottom:1px solid #bbb;padding:.6mm 0;white-space:pre-line;overflow-wrap:anywhere">${escapeHtml(value || '—')}</td></tr>`;
+      const costs = `<table style="width:100%;border-collapse:collapse;font-size:.95em;table-layout:fixed">${[['Вартість деталей',partTotal],['Вартість робіт',total-partTotal],['Разом до сплати',total]].map(([label,amount],i)=>`<tr style="${i===2?'font-weight:bold':''}"><td style="border:1px solid #222;padding:1mm;text-align:right;width:35%">${formatMoney(amount)}</td><td style="border:1px solid #222;padding:1mm;text-align:right">${label}</td></tr>`).join('')}</table>`;
+      const partRows = parts.map(w=>`<tr><td style="border:1px solid #222;padding:.8mm;overflow-wrap:anywhere">${escapeHtml(w.title || w.name || '—')}${getWorkQuantity(w)!==1?' × '+getWorkQuantity(w):''}</td><td style="border:1px solid #222;padding:.8mm;text-align:right">${formatMoney(getWorkLineTotal(w))}</td></tr>`).join('');
+      const blanks = Array.from({length:Math.max(0,(wide?3:1)-parts.length)},()=>'<tr><td style="border:1px solid #222;height:4mm">&nbsp;</td><td style="border:1px solid #222">&nbsp;</td></tr>').join('');
+      return `<div class="receipt-classic" style="position:relative;box-sizing:border-box;padding:${receiptNumber(tpl.marginMm,0,30,8)}mm;font-size:${receiptNumber(tpl.fontSizePt,6,18,10)}pt;line-height:1.2;color:#111;font-family:Arial,sans-serif;overflow-wrap:anywhere">
+        ${receiptOverlayImages(tpl)}
+        <div style="display:${wide?'flex':'block'};align-items:flex-start;gap:3mm;margin-bottom:2mm;">
+          ${logo?`<div style="flex:0 0 auto;max-width:${wide?'28%':'100%'};text-align:center">${logo}</div>`:''}
+          <div style="flex:1;text-align:center;min-width:0">${header?`<div style="font-weight:bold;white-space:pre-line">${escapeHtml(header)}</div>`:''}<div style="font-size:1.15em;font-weight:bold;margin:2mm 0 1mm">${escapeHtml(title)}</div>${String(tpl.docTitle || '').includes('{order_id}') ? '' : `<div style="font-size:1.2em;font-weight:bold">№ ${escapeHtml(order.id)}</div>`}<div>від ${receiptDisplayDate(date || (order.status==='issued'?'':getTodayPrefix()))}</div></div>
+          <div style="flex:0 0 29%;text-align:${wide?'right':'center'};white-space:pre-line;font-size:.9em">${[tpl.showCompanyAddress&&(branch.address||db.companyAddress),tpl.showBranch&&(branch.name||order.branch),tpl.showCompanyPhone&&(branch.phone||db.companyPhone),tpl.contactText].filter(Boolean).map(escapeHtml).join('<br>')}</div>
+        </div>
+        <table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-bottom:2mm">${field('П.І.Б.',order.clientName)}${field('Мобільний телефон',order.clientPhone)}${field('Найменування',order.device)}${tpl.showSerial?field('Зав. номер',order.serial):''}${tpl.showCompleteness!==false?field('Комплектація',order.completeness):''}${intake?field('Несправність',order.problem):field('Виконана робота',services.map(w=>w.title||w.name).filter(Boolean).join('; ') || order.description)}${!intake?field('Дата прийняття',receiptDisplayDate(order.createdAt)):''}${tpl.showMaster?field('Майстер',order.masterName || order.master):''}${intake&&Number(order.estimatedPrice)>0?field('Орієнтовна сума',formatMoney(order.estimatedPrice)):''}</table>
+        ${!intake?`<div style="display:${wide?'flex':'block'};gap:4mm;align-items:flex-start"><div style="flex:1;min-width:0;margin-bottom:2mm"><table style="width:100%;border-collapse:collapse">${field('Гарантія на ремонт',(Number(order.warrantyDays)||0)+' днів')}${field('Дата закінчення гарантії',receiptDisplayDate(getWarrantyUntilDate(order)))}</table><div style="margin-top:5mm">Клієнт __________________</div><div style="margin-top:5mm">Менеджер ______________</div></div><div style="flex:1.2;min-width:0">${costs}<table style="width:100%;border-collapse:collapse;table-layout:fixed;margin-top:3mm"><thead><tr><th style="border:1px solid #222;padding:1mm">Назва деталі</th><th style="border:1px solid #222;padding:1mm;width:33%">Вартість</th></tr></thead><tbody>${partRows}${blanks}</tbody></table></div></div>`:`<div style="margin-top:4mm">Клієнт __________________ &nbsp; Менеджер __________________</div>`}
+        ${terms?`<div style="font-size:.84em;white-space:pre-line;margin-top:3mm">${escapeHtml(terms)}</div>`:''}
+        ${footer?`<div style="text-align:center;font-weight:bold;white-space:pre-line;margin-top:2mm">${escapeHtml(footer)}</div>`:''}
+      </div>`;
+    }
+    function renderReceiptCopies(order,type,tpl) {
+      const html = renderSingleReceiptCopyHtml(order,type,tpl);
+      return Number(tpl.copiesPerPage) === 2 ? html+'<div style="border-top:1px dashed #000;margin:2mm 0"></div>'+html : html;
+    }
     // =========================================================================
     // 13. CLIENTS VIEW (FAST O(N+M) INDEX + CLIENT HISTORY CARD)
     // =========================================================================
@@ -3149,10 +3296,8 @@
       let missingDates=0;
       for(const o of orders) {
         if(!o||o.deleted||o.status!=='issued') continue;
-        const date=normalizeDateToIso(o.issuedDate);
-        // Validate calendar date as well as shape (legacy import may contain invalid dates).
-        const parsed=date?new Date(date+'T00:00:00Z'):null;
-        if(!parsed||!Number.isFinite(parsed.getTime())||parsed.toISOString().slice(0,10)!==date){missingDates++;continue;}
+        const date=getOrderIssuedDate(o);
+        if(!date){missingDates++;continue;}
         if(date<range.start||date>=range.end) continue;
         const m=analyticsOrderMetrics(o); analyticsAdd(service,m);
         const row=rows.get(String(o.masterId??'')); analyticsAdd(row?row.metrics:unassigned,m);
@@ -4135,26 +4280,32 @@
       showToast('Файл BUILD_WINDOWS_EXE.bat завантажено!');
     }
 
-    function openReceiptEditorModal(initialTab = 'intake') {
+    let receiptDraft = null, receiptPreviewOrderId = null, receiptPreviewTimer = null, receiptEditorSaved = null;
+    const receiptLoadingDrafts = new WeakSet();
+    function openReceiptEditorModal(initialTab = 'intake', orderId = null) {
       if (!requireDirectorAccess()) return;
       ensureReceiptTemplates();
-      const tab = initialTab === 'issue' ? 'issue' : 'intake';
-      const tpl = db.receiptTemplates[tab];
+      const tab = receiptEditorTab = initialTab === 'issue' ? 'issue' : 'intake';
+      receiptPreviewOrderId = orderId;
+      const tpl = receiptDraft = JSON.parse(JSON.stringify(db.receiptTemplates[tab]));
       const dims = getPaperDimensions(tpl);
 
       openModal(`
         <div class="p-6 space-y-4 max-h-[92vh] overflow-y-auto text-xs">
           <div class="flex items-center justify-between border-b border-gray-100 pb-3">
             <h3 class="text-base font-bold text-gray-900">Конструктор шаблону квитанцій</h3>
-            <button onclick="closeModal()" class="text-gray-400 hover:text-gray-600 font-bold">✕</button>
+            <button onclick="closeReceiptEditor()" class="text-gray-400 hover:text-gray-600 font-bold">✕</button>
           </div>
 
           <div class="flex gap-2">
-            <button type="button" onclick="openReceiptEditorModal('intake')" class="px-4 py-2 rounded-xl font-semibold ${tab === 'intake' ? 'bg-[#143430] text-white' : 'bg-gray-100 text-gray-700'}">Квитанція прийому</button>
-            <button type="button" onclick="openReceiptEditorModal('issue')" class="px-4 py-2 rounded-xl font-semibold ${tab === 'issue' ? 'bg-[#143430] text-white' : 'bg-gray-100 text-gray-700'}">Квитанція видачі / Гарантія</button>
+            <button type="button" onclick="switchReceiptEditorTab('intake')" class="px-4 py-2 rounded-xl font-semibold ${tab === 'intake' ? 'bg-[#143430] text-white' : 'bg-gray-100 text-gray-700'}">Квитанція прийому</button>
+            <button type="button" onclick="switchReceiptEditorTab('issue')" class="px-4 py-2 rounded-xl font-semibold ${tab === 'issue' ? 'bg-[#143430] text-white' : 'bg-gray-100 text-gray-700'}">Квитанція видачі / Гарантія</button>
           </div>
 
-          <form onsubmit="saveReceiptTemplateForm(event, '${tab}')" class="space-y-3">
+          <div class="receipt-editor-columns">
+          <form id="rt-form" oninput="scheduleReceiptPreview()" onchange="scheduleReceiptPreview()" onsubmit="saveReceiptTemplateForm(event, '${tab}')" class="space-y-3 min-w-0">
+            <div class="flex flex-wrap gap-2 items-end"><label class="flex-1 font-semibold">Макет квитанції<select id="rt-layout" class="mt-1 w-full rounded-xl border border-gray-200 px-3 py-2 bg-white"><option value="standard" ${tpl.layout !== 'classic'?'selected':''}>Стандартний</option><option value="classic" ${tpl.layout === 'classic'?'selected':''}>Класичний</option></select></label><button type="button" onclick="applyClassicReceiptPreset()" class="px-3 py-2 rounded-lg bg-teal-50 text-teal-800 font-semibold">A5 альбомний · класичний</button></div>
+            <label class="block font-semibold">Додаткові контакти / email (класичний макет)<textarea id="rt-contacts" rows="2" class="mt-1 w-full rounded-xl border border-gray-200 px-3 py-2">${escapeHtml(tpl.contactText || '')}</textarea></label>
             <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
                 <label class="block font-semibold mb-1">Формат паперу</label>
@@ -4194,18 +4345,18 @@
             <div id="rt-custom-dims" class="${tpl.paperFormat === 'custom' ? 'grid' : 'hidden'} grid-cols-2 gap-3">
               <div>
                 <label class="block font-semibold mb-1">Ширина (мм)</label>
-                <input id="rt-w" type="number" min="40" max="400" value="${dims.widthMm}" class="w-full rounded-xl border border-gray-200 px-3 py-2" />
+                <input id="rt-w" type="number" min="40" max="400" value="${tpl.customWidthMm || 148}" class="w-full rounded-xl border border-gray-200 px-3 py-2" />
               </div>
               <div>
                 <label class="block font-semibold mb-1">Висота (мм)</label>
-                <input id="rt-h" type="number" min="40" max="600" value="${dims.heightMm}" class="w-full rounded-xl border border-gray-200 px-3 py-2" />
+                <input id="rt-h" type="number" min="40" max="600" value="${tpl.customHeightMm || 210}" class="w-full rounded-xl border border-gray-200 px-3 py-2" />
               </div>
             </div>
 
             <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
                 <label class="block font-semibold mb-1">Внутрішні поля (мм)</label>
-                <input id="rt-margin" type="number" min="0" max="30" value="${Number(tpl.marginMm) || 8}" class="w-full rounded-xl border border-gray-200 px-3 py-2" />
+                <input id="rt-margin" type="number" min="0" max="30" value="${receiptNumber(tpl.marginMm,0,30,8)}" class="w-full rounded-xl border border-gray-200 px-3 py-2" />
               </div>
               <div>
                 <label class="block font-semibold mb-1">Розмір шрифту (pt)</label>
@@ -4250,33 +4401,21 @@
               <label class="inline-flex items-center gap-1.5"><input id="rt-s-master" type="checkbox" ${tpl.showMaster ? 'checked' : ''} /> Майстер</label>
             </div>
 
-            <!-- LOGO / STAMP IMAGE UPLOAD -->
             <div class="p-3 rounded-xl bg-gray-50 border border-gray-200 space-y-2">
-              <div class="flex items-center justify-between">
-                <span class="font-semibold">Логотип або печатка на квитанції (${(tpl.images || []).length})</span>
-                <label class="px-3 py-1.5 rounded-lg bg-white border border-gray-200 hover:bg-gray-100 font-semibold cursor-pointer">
-                  + Додати зображення (PNG/JPG)
-                  <input type="file" accept="image/*" onchange="addReceiptImage(event, '${tab}')" class="hidden" />
-                </label>
-              </div>
-              ${(tpl.images || []).map((img, i) => `
-                <div class="flex flex-wrap items-center gap-2 bg-white p-2 rounded-lg border border-gray-200">
-                  <img src="${img.dataUrl}" class="w-8 h-8 object-contain border rounded" />
-                  <label>X(%): <input type="number" min="0" max="95" value="${img.xPct}" onchange="updateReceiptImageProp('${tab}', ${i}, 'xPct', this.value)" class="w-14 border rounded px-1 py-0.5" /></label>
-                  <label>Y(%): <input type="number" min="0" max="95" value="${img.yPct}" onchange="updateReceiptImageProp('${tab}', ${i}, 'yPct', this.value)" class="w-14 border rounded px-1 py-0.5" /></label>
-                  <label>Шир.(мм): <input type="number" min="5" max="150" value="${img.widthMm}" onchange="updateReceiptImageProp('${tab}', ${i}, 'widthMm', this.value)" class="w-16 border rounded px-1 py-0.5" /></label>
-                  <button type="button" onclick="removeReceiptImage('${tab}', ${i})" class="ml-auto text-red-600 font-bold">✕</button>
-                </div>
-              `).join('')}
+              <div class="flex flex-wrap items-center justify-between gap-2"><span class="font-semibold">Логотипи / печатки</span><label class="px-3 py-1.5 rounded-lg bg-white border cursor-pointer font-semibold">+ PNG / JPG / WebP<input type="file" accept="image/png,image/jpeg,image/webp" onchange="addReceiptImage(event, '${tab}')" class="hidden" /></label></div>
+              <p class="text-gray-500">Логотип у шапці або зображення з вільним позиціонуванням. Зміни зберігаються кнопкою нижче.</p><div id="rt-images" class="space-y-2"></div>
             </div>
 
             <div class="flex justify-end gap-2 pt-3 border-t border-gray-100">
-              <button type="button" onclick="closeModal()" class="px-4 py-2 rounded-xl border border-gray-200">Закрити</button>
+              <button type="button" onclick="closeReceiptEditor()" class="px-4 py-2 rounded-xl border border-gray-200">Закрити</button>
               <button type="submit" class="px-5 py-2 rounded-xl bg-[#1c6457] text-white font-semibold">Зберегти шаблон</button>
             </div>
           </form>
+          <aside class="receipt-preview-panel min-w-0 bg-gray-100 rounded-xl p-3"><div class="font-bold text-sm mb-1">Попередній перегляд</div><div id="rt-preview-info" class="text-gray-500 mb-2"></div><div id="rt-preview-scroll" class="overflow-auto"><div id="rt-preview-page" style="background:white;color:#111;box-sizing:border-box;box-shadow:0 1px 5px #bbb"></div></div></aside>
+          </div>
         </div>
-      `, 'max-w-3xl');
+      `, 'max-w-[1450px]');
+      renderReceiptImageControls(); refreshReceiptPreview(); receiptEditorSaved = JSON.stringify(receiptDraft);
     }
 
     function toggleCustomPaperFields() {
@@ -4292,69 +4431,110 @@
       }
     }
 
+    function readReceiptDraft(tab) {
+      const tpl = receiptDraft;
+      if (!tpl || !document.getElementById('rt-form')) return null;
+      const el = id => document.getElementById(id);
+      tpl.paperFormat = el('rt-paper').value;
+      tpl.orientation = el('rt-orient').value;
+      tpl.layout = el('rt-layout').value;
+      tpl.contactText = el('rt-contacts').value;
+      tpl.fitToA4Top = el('rt-fit-a4-top').checked;
+      tpl.offsetTopMm = receiptNumber(el('rt-offset-top').value,0,200,0);
+      tpl.copiesPerPage = Number(el('rt-copies').value) === 2 ? 2 : 1;
+      tpl.customWidthMm = receiptNumber(el('rt-w').value,40,400,148);
+      tpl.customHeightMm = receiptNumber(el('rt-h').value,40,600,210);
+      tpl.marginMm = receiptNumber(el('rt-margin').value,0,30,8);
+      tpl.fontSizePt = receiptNumber(el('rt-font').value,6,18,10);
+      tpl.printerName = el('rt-printer').value;
+      tpl.headerText = el('rt-header').value; tpl.docTitle = el('rt-title').value; tpl.footerText = el('rt-footer').value;
+      if (tab === 'intake') tpl.termsText = el('rt-terms').value; else tpl.warrantyText = el('rt-terms').value;
+      for (const [prop,id] of [['showBranch','branch'],['showCompanyPhone','phone'],['showCompanyAddress','addr'],['showSerial','serial'],['showCompleteness','comp'],['showMaster','master']]) tpl[prop] = el('rt-s-'+id).checked;
+      return tpl;
+    }
+    let receiptEditorTab = 'intake';
+    function switchReceiptEditorTab(tab) {
+      if (tab === receiptEditorTab || !canCloseReceiptEditor()) return;
+      openReceiptEditorModal(tab, receiptPreviewOrderId);
+    }
+    function canCloseReceiptEditor() {
+      const draft=readReceiptDraft(receiptEditorTab);
+      return !draft || JSON.stringify(draft)===receiptEditorSaved || confirm('Незбережені зміни шаблону буде втрачено. Продовжити?');
+    }
+    function closeReceiptEditor() { if (canCloseReceiptEditor()) { receiptDraft=null; closeModal(); } }
+    function scheduleReceiptPreview() {
+      clearTimeout(receiptPreviewTimer); receiptPreviewTimer = setTimeout(refreshReceiptPreview,120);
+    }
+    function previewReceiptOrder() {
+      const found = receiptPreviewOrderId != null && (db.orders || []).find(o=>String(o.id)===String(receiptPreviewOrderId));
+      if (found) return found;
+      return {id:'00001',clientName:'Приклад клієнта',clientPhone:'050-000-00-00',device:'Ноутбук',serial:'SN123456',completeness:'Ноутбук, зарядний пристрій',problem:'Не вмикається',description:'Відновлення системної плати',createdAt:getTodayPrefix(),issuedDate:getTodayPrefix(),status:'issued',warrantyDays:90,masterName:'Майстер',works:[{type:'work',title:'Ремонт системної плати',price:2200},{type:'part',title:'Роз’єм живлення',qty:1,price:300}]};
+    }
+    function refreshReceiptPreview() {
+      const tpl = readReceiptDraft(receiptEditorTab), page = document.getElementById('rt-preview-page'), scroll = document.getElementById('rt-preview-scroll');
+      if (!tpl || !page || !scroll) return;
+      const dims = getPaperDimensions(tpl), a4 = ['a5','a6'].includes(tpl.paperFormat) && tpl.fitToA4Top !== false;
+      const width = a4 ? 210 : dims.widthMm, height = a4 ? 297 : dims.heightMm;
+      const px = width * 96 / 25.4, zoom = Math.min(1,Math.max(.15,(scroll.clientWidth-8)/px));
+      page.style.width=width+'mm';page.style.minHeight=height+'mm';page.style.zoom=zoom;
+      page.innerHTML=`<div style="width:${dims.widthMm}mm;padding-top:${tpl.offsetTopMm}mm;box-sizing:border-box">${renderReceiptCopies(previewReceiptOrder(),receiptEditorTab,tpl)}</div>`;
+      const info = document.getElementById('rt-preview-info');
+      info.textContent=(receiptPreviewOrderId==null?'Тестові дані · ':'')+`${dims.widthMm} × ${dims.heightMm} мм${a4?' · аркуш A4':''} · ${Math.round(zoom*100)}%`;
+      if (page.scrollHeight > height * 96 / 25.4 + 3) info.textContent+=' · вміст перевищує висоту аркуша';
+    }
+    function applyClassicReceiptPreset() {
+      document.getElementById('rt-layout').value='classic';document.getElementById('rt-paper').value='a5';document.getElementById('rt-orient').value='landscape';document.getElementById('rt-margin').value='6';document.getElementById('rt-font').value='9';document.getElementById('rt-title').value=receiptEditorTab==='issue'?'КВИТАНЦІЯ ПРО ВИДАЧУ':'КВИТАНЦІЯ ПРО ПРИЙОМ';toggleCustomPaperFields();refreshReceiptPreview();
+    }
     function saveReceiptTemplateForm(e, tab) {
-      e.preventDefault();
-      ensureReceiptTemplates();
-      const tpl = db.receiptTemplates[tab];
-      tpl.paperFormat = document.getElementById('rt-paper').value;
-      tpl.orientation = document.getElementById('rt-orient').value;
-      tpl.fitToA4Top = document.getElementById('rt-fit-a4-top').checked;
-      tpl.offsetTopMm = Math.max(0, Number(document.getElementById('rt-offset-top').value) || 0);
-      tpl.copiesPerPage = Number(document.getElementById('rt-copies').value) || 1;
-      tpl.customWidthMm = Number(document.getElementById('rt-w').value) || 148;
-      tpl.customHeightMm = Number(document.getElementById('rt-h').value) || 210;
-      tpl.marginMm = Number(document.getElementById('rt-margin').value) || 8;
-      tpl.fontSizePt = Number(document.getElementById('rt-font').value) || 10;
-      tpl.printerName = document.getElementById('rt-printer').value;
-      tpl.headerText = document.getElementById('rt-header').value;
-      tpl.docTitle = document.getElementById('rt-title').value;
-      tpl.footerText = document.getElementById('rt-footer').value;
-      if (tab === 'intake') tpl.termsText = document.getElementById('rt-terms').value;
-      else tpl.warrantyText = document.getElementById('rt-terms').value;
-      tpl.showBranch = document.getElementById('rt-s-branch').checked;
-      tpl.showCompanyPhone = document.getElementById('rt-s-phone').checked;
-      tpl.showCompanyAddress = document.getElementById('rt-s-addr').checked;
-      tpl.showSerial = document.getElementById('rt-s-serial').checked;
-      tpl.showCompleteness = document.getElementById('rt-s-comp').checked;
-      tpl.showMaster = document.getElementById('rt-s-master').checked;
-      saveDB(false, [['receiptTemplates']]);
-      showToast('Шаблон квитанції збережено!');
+      e.preventDefault(); if (!requireDirectorAccess()) return;
+      const tpl = readReceiptDraft(tab); if (!tpl) return;
+      if (receiptLoadingDrafts.has(tpl)) return showToast('Зачекайте завершення обробки зображення.','error');
+      ensureReceiptTemplates(); db.receiptTemplates[tab] = JSON.parse(JSON.stringify(tpl));
+      saveDB(false, [['receiptTemplates']]); receiptEditorSaved=JSON.stringify(tpl); showToast('Шаблон квитанції збережено!');
     }
-
-    function addReceiptImage(e, tab) {
-      const file = e.target.files && e.target.files[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = () => {
-        ensureReceiptTemplates();
-        db.receiptTemplates[tab].images.push({
-          dataUrl: reader.result,
-          xPct: 65,
-          yPct: 60,
-          widthMm: 30,
-          opacity: 0.9
-        });
-        saveDB(false, [['receiptTemplates']]);
-        openReceiptEditorModal(tab);
-      };
-      reader.readAsDataURL(file);
+    function renderReceiptImageControls() {
+      const box = document.getElementById('rt-images'); if (!box || !receiptDraft) return;
+      box.innerHTML=(receiptDraft.images || []).map((img,i)=>`<div class="flex flex-wrap items-center gap-2 bg-white p-2 rounded-lg border">
+        ${receiptImageSource(img)?`<img src="${escapeHtml(receiptImageSource(img))}" class="w-10 h-10 object-contain border rounded" />`:'<span class="text-red-600">Невідомий формат</span>'}
+        <select aria-label="Розташування" onchange="updateReceiptImageProp(${i},'placement',this.value)" class="border rounded p-1"><option value="logo" ${img.placement==='logo'?'selected':''}>У шапці</option><option value="overlay" ${img.placement!=='logo'?'selected':''}>Вільне</option></select>
+        <label>X% <input type="number" min="0" max="95" value="${receiptNumber(img.xPct,0,95,0)}" ${img.placement==='logo'?'disabled':''} oninput="updateReceiptImageProp(${i},'xPct',this.value)" class="w-14 border rounded p-1" /></label>
+        <label>Y% <input type="number" min="0" max="95" value="${receiptNumber(img.yPct,0,95,0)}" ${img.placement==='logo'?'disabled':''} oninput="updateReceiptImageProp(${i},'yPct',this.value)" class="w-14 border rounded p-1" /></label>
+        <label>мм <input type="number" min="5" max="150" value="${receiptNumber(img.widthMm,5,150,25)}" oninput="updateReceiptImageProp(${i},'widthMm',this.value)" class="w-16 border rounded p-1" /></label>
+        <label>% <input type="number" min="0" max="100" value="${Math.round(receiptNumber(img.opacity,0,1,1)*100)}" oninput="updateReceiptImageProp(${i},'opacity',this.value/100)" class="w-14 border rounded p-1" /></label>
+        <button type="button" onclick="removeReceiptImage(${i})" class="ml-auto text-red-600 font-bold">✕</button></div>`).join('');
     }
-
-    function updateReceiptImageProp(tab, idx, prop, val) {
-      ensureReceiptTemplates();
-      const img = db.receiptTemplates[tab].images[idx];
-      if (!img) return;
-      img[prop] = Number(val) || 0;
-      saveDB(false, [['receiptTemplates']]);
+    async function addReceiptImage(e, tab) {
+      if (!requireDirectorAccess()) return;
+      const input=e.target,file=input.files?.[0],draft=receiptDraft; if (!file || !draft) return;
+      input.value='';
+      if (!['image/png','image/jpeg','image/webp'].includes(file.type) || file.size>10*1024*1024) return showToast('Оберіть PNG, JPG або WebP до 10 МБ.','error');
+      if (receiptLoadingDrafts.has(draft)) return showToast('Зображення вже обробляється.','error');
+      const url=URL.createObjectURL(file); receiptLoadingDrafts.add(draft);
+      try {
+        const image=new Image(); image.src=url; await image.decode();
+        const scale=Math.min(1,768/Math.max(image.naturalWidth,image.naturalHeight));
+        const canvas=document.createElement('canvas'); canvas.width=Math.max(1,Math.round(image.naturalWidth*scale));canvas.height=Math.max(1,Math.round(image.naturalHeight*scale));
+        const ctx=canvas.getContext('2d');ctx.drawImage(image,0,0,canvas.width,canvas.height);
+        let dataUrl=canvas.toDataURL(file.type==='image/jpeg'?'image/jpeg':'image/png',.85);
+        if (dataUrl.length>350000) dataUrl=canvas.toDataURL('image/webp',.8);
+        if (!receiptImageSource({dataUrl}) || dataUrl.length>750000) throw Error('Зображення занадто велике після стиснення');
+        if (receiptDraft!==draft || !document.getElementById('rt-form')) return;
+        if ((draft.images||[]).reduce((n,img)=>n+String(img.dataUrl||'').length,0)+dataUrl.length>1500000) throw Error('Забагато зображень у шаблоні');
+        draft.images.push({dataUrl,placement:'logo',xPct:0,yPct:0,widthMm:25,opacity:1});
+        renderReceiptImageControls();refreshReceiptPreview();
+      } catch(err) {showToast('Помилка завантаження: '+err.message,'error');}
+      finally {receiptLoadingDrafts.delete(draft); URL.revokeObjectURL(url);}
     }
-
-    function removeReceiptImage(tab, idx) {
-      ensureReceiptTemplates();
-      db.receiptTemplates[tab].images.splice(idx, 1);
-      saveDB(false, [['receiptTemplates']]);
-      openReceiptEditorModal(tab);
+    function updateReceiptImageProp(idx,prop,value) {
+      if (!receiptDraft?.images[idx]) return;
+      const img=receiptDraft.images[idx];
+      if (prop==='placement') {img.placement=value==='logo'?'logo':'overlay';renderReceiptImageControls();}
+      else if (prop==='widthMm') img.widthMm=receiptNumber(value,5,150,25);
+      else if (prop==='opacity') img.opacity=receiptNumber(value,0,1,1);
+      else if (['xPct','yPct'].includes(prop)) img[prop]=receiptNumber(value,0,95,0);
+      scheduleReceiptPreview();
     }
-
+    function removeReceiptImage(idx) { if (!receiptDraft) return; receiptDraft.images.splice(idx,1);renderReceiptImageControls();refreshReceiptPreview(); }
     // =========================================================================
     // 19. EXPORT / IMPORT / RESET DATABASE
     // =========================================================================
@@ -4927,7 +5107,7 @@
         const modalRoot = document.getElementById('modal-root');
         if (modalRoot && !modalRoot.classList.contains('hidden')) {
           event.preventDefault();
-          closeModal();
+          if (document.getElementById('rt-form')) closeReceiptEditor(); else closeModal();
         }
       }
     });
