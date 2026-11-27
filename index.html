@@ -62,6 +62,81 @@
         font-family: 'Inter', 'Segoe UI', Roboto, 'DejaVu Sans', sans-serif !important;
       }
     }
+    /* App viewport: keep the application shell fixed and scroll only content areas. */
+    html, body {
+      height: 100%;
+      overflow: hidden;
+    }
+    #app-shell {
+      height: 100vh;
+      height: 100dvh;
+      min-height: 0;
+      overflow: hidden;
+    }
+    #main-content-wrapper {
+      height: 100%;
+      min-height: 0;
+      overflow: hidden;
+    }
+    #workspace {
+      min-height: 0;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+    }
+    #workspace.workspace-orders {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .orders-page {
+      display: flex;
+      flex: 1 1 auto;
+      flex-direction: column;
+      min-height: 0;
+      height: 100%;
+      gap: 1rem;
+    }
+    .orders-fixed-block {
+      flex: 0 0 auto;
+    }
+    .orders-list-scroll {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow: auto;
+      overscroll-behavior: contain;
+      scrollbar-gutter: stable;
+    }
+    .orders-list-scroll thead th {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      background: #f9fafb;
+    }
+    #main-content-wrapper > header {
+      flex: 0 0 auto;
+    }
+    /* Fallback to normal workspace scroll on compact/short viewports so the table never gets squished */
+    @media (max-width: 767px), (max-height: 680px) {
+      #workspace.workspace-orders {
+        display: block;
+        overflow-y: auto;
+      }
+      .orders-page {
+        height: auto;
+      }
+      .orders-list-scroll {
+        min-height: 280px;
+      }
+    }
+    @media (max-width: 640px) {
+      .orders-page {
+        gap: .75rem;
+      }
+      .orders-list-scroll {
+        scrollbar-gutter: auto;
+      }
+    }
+
     /* Compact desktop sidebar state */
     @media (min-width: 1024px) {
       #sidebar.sidebar-compact {
@@ -231,11 +306,11 @@
     </aside>
 
     <!-- MAIN CONTENT WRAPPER -->
-    <div class="flex-1 flex flex-col min-w-0">
+    <div id="main-content-wrapper" class="flex-1 flex flex-col min-w-0">
       <!-- TOP HEADER BAR -->
       <header class="h-14 bg-white border-b border-gray-200 px-4 lg:px-6 flex items-center justify-between gap-3 sticky top-0 z-20">
         <!-- Left controls -->
-        <div class="flex items-center gap-2.5 sm:gap-3 flex-wrap">
+        <div class="flex items-center gap-3">
           <button onclick="toggleSidebar(true)" class="p-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 lg:hidden">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
           </button>
@@ -311,8 +386,9 @@
     // =========================================================================
     // 0. APPLICATION VERSION & CLOUD UPDATE METADATA
     // =========================================================================
-    const APP_VERSION = '2.2.3';
-    const APP_BUILD_DATE = '2026-11-26';
+    const APP_VERSION = '2.2.5';
+    const APP_BUILD_DATE = '2026-11-27';
+    const STORAGE_KEY = 'sc_crm_db_v2';
 
     // =========================================================================
     // 1. LOCALIZATION DICTIONARY (UA / RU)
@@ -341,7 +417,7 @@
         kpiWaitingParts: 'очікують запчастини',
         kpiReady: 'готові до видачі',
         searchLabel: 'ПОШУК',
-        searchPlaceholder: 'Номер, клієнт, телефон, пристрій, серійний...',
+        searchPlaceholder: 'Пошук по всіх вкладках: номер, клієнт, телефон, пристрій, серійний...',
         btnFind: 'Знайти',
         btnFilters: 'Фільтри',
         btnCreateOrder: '+ Створити замовлення',
@@ -412,7 +488,7 @@
         kpiWaitingParts: 'ожидают запчасти',
         kpiReady: 'готовы к выдаче',
         searchLabel: 'ПОИСК',
-        searchPlaceholder: 'Номер, клиент, телефон, устройство, серийный...',
+        searchPlaceholder: 'Поиск по всем вкладкам: номер, клиент, телефон, устройство, серийный...',
         btnFind: 'Найти',
         btnFilters: 'Фильтры',
         btnCreateOrder: '+ Создать заказ',
@@ -462,81 +538,14 @@
       }
     };
 
+    // =========================================================================
+    // 2. APPLICATION STATE & METADATA CONSTANTS
+    // =========================================================================
+    let db = null;
     let currentLang = 'ua';
-    function t(key) {
-      return (I18N[currentLang] && I18N[currentLang][key]) || key;
-    }
-
-    // =========================================================================
-    // 2. PASSWORD HASHING & ROLE ACCESS CONTROL
-    // =========================================================================
-    const LEGACY_SALTS = [
-      'SC_CRM_SALT_2026::',
-      'LINETIX_CRM_SALT_2026::',
-      'LINETIX_SALT_2026::',
-      'SERVICE_CRM_SALT_2026::',
-      'CRM_SALT_2026::',
-      ''
-    ];
-
-    function hashPasswordWithSalt(str, salt) {
-      const salted = String(salt || '') + String(str || '');
-      let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
-      for (let i = 0; i < salted.length; i++) {
-        const ch = salted.charCodeAt(i);
-        h1 = Math.imul(h1 ^ ch, 2654435761);
-        h2 = Math.imul(h2 ^ ch, 1597334677);
-      }
-      h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-      h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-      return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16);
-    }
-
-    function hashPassword(str) {
-      return hashPasswordWithSalt(str, 'SC_CRM_SALT_2026::');
-    }
-
-    function verifyDirectorPassword(inputPass) {
-      const storedHash = db.directorPasswordHash || db.masterPasswordHash || db.adminPasswordHash || '';
-      if (!storedHash) return true;
-      const candidates = [String(inputPass || ''), String(inputPass || '').trim()];
-      for (const cand of candidates) {
-        if (!cand) continue;
-        if (storedHash === cand) return true;
-        for (const salt of LEGACY_SALTS) {
-          if (hashPasswordWithSalt(cand, salt) === storedHash) {
-            db.directorPasswordHash = hashPassword(cand);
-            saveDB(true);
-            return true;
-          }
-        }
-      }
-      return false;
-    }
-
-    function getCurrentUser() {
-      const list = Array.isArray(db.employees) ? db.employees : [];
-      return list.find(e => e.id === db.currentUserId) || list[0] || { id: 'dir_1', name: 'Директор', role: 'director' };
-    }
-
-    function isDirector() {
-      const u = getCurrentUser();
-      return u && u.role === 'director';
-    }
-
-    function requireDirectorAccess() {
-      if (isDirector()) return true;
-      showToast(t('accessDeniedDirector'), 'error');
-      return false;
-    }
-
-    // =========================================================================
-    // 3. APPLICATION STATE & CONSTANTS
-    // =========================================================================
-    const STORAGE_KEY = 'sc_crm_db_v2';
-    let db = {};
     let currentView = 'orders';
     let currentBranchFilter = 'all';
+
     let ordersTab = 'active';
     let ordersSearch = '';
     let ordersStatusFilter = 'all';
@@ -544,11 +553,11 @@
     let ordersSortField = 'id';
     let ordersSortDir = 'desc';
     let ordersPageLimit = 100;
+
     let clientsSearch = '';
     let clientsPageLimit = 100;
     let partsSearch = '';
     let partsPageLimit = 100;
-    let _searchDebounceTimer = null;
 
     const STATUS_META = {
       new: { labelKey: 'statusNew', badge: 'bg-sky-50 text-sky-700 border-sky-200' },
@@ -556,25 +565,29 @@
       waiting_parts: { labelKey: 'statusWaitingParts', badge: 'bg-purple-50 text-purple-700 border-purple-200' },
       approval: { labelKey: 'statusApproval', badge: 'bg-orange-50 text-orange-700 border-orange-200' },
       ready: { labelKey: 'statusReady', badge: 'bg-emerald-50 text-emerald-700 border-emerald-200' },
-      no_repair: { labelKey: 'statusNoRepair', badge: 'bg-slate-100 text-slate-700 border-slate-200' },
-      cancelled: { labelKey: 'statusCancelled', badge: 'bg-rose-50 text-rose-700 border-rose-200' },
-      issued: { labelKey: 'statusIssued', badge: 'bg-teal-50 text-teal-800 border-teal-200' }
+      issued: { labelKey: 'statusIssued', badge: 'bg-gray-100 text-gray-700 border-gray-200' },
+      cancelled: { labelKey: 'statusCancelled', badge: 'bg-red-50 text-red-700 border-red-200' },
+      no_repair: { labelKey: 'statusNoRepair', badge: 'bg-slate-100 text-slate-700 border-slate-200' }
     };
 
     const PAPER_PRESETS = {
       a4: { label: 'A4 (210 × 297 мм)', widthMm: 210, heightMm: 297 },
       a5: { label: 'A5 (148 × 210 мм)', widthMm: 148, heightMm: 210 },
       a6: { label: 'A6 (105 × 148 мм)', widthMm: 105, heightMm: 148 },
-      thermal80: { label: 'Чекова стрічка 80 мм', widthMm: 80, heightMm: 200 },
-      thermal58: { label: 'Чекова стрічка 58 мм', widthMm: 58, heightMm: 180 },
-      custom: { label: 'Власний розмір (мм)', widthMm: 148, heightMm: 210 }
+      thermal80: { label: 'Термопринтер 80 мм', widthMm: 80, heightMm: 200 },
+      thermal58: { label: 'Термопринтер 58 мм', widthMm: 58, heightMm: 180 },
+      custom: { label: 'Довільний розмір (мм)', widthMm: 148, heightMm: 210 }
     };
 
     // =========================================================================
-    // 4. UTILITIES (FORMATTING, UNIVERSAL DATE PARSER, TOASTS, MODALS)
+    // 3. CORE UTILITIES (ESCAPING, DATES, MONEY, PHONE, TOAST, MODAL)
     // =========================================================================
-    function escapeHtml(str) {
-      return String(str == null ? '' : str)
+    function t(key) {
+      return (I18N[currentLang] && I18N[currentLang][key]) || I18N.ua[key] || key;
+    }
+
+    function escapeHtml(val) {
+      return String(val == null ? '' : val)
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
@@ -582,254 +595,31 @@
         .replace(/'/g, '&#39;');
     }
 
-    function formatMoney(val) {
-      const num = Number(val) || 0;
-      return num.toLocaleString('uk-UA', { minimumFractionDigits: 0, maximumFractionDigits: 2 }) + ' грн';
-    }
-
-    function toArrayFromFirebase(raw) {
-      if (!raw) return [];
-      if (Array.isArray(raw)) return raw.filter(item => item && typeof item === 'object');
-      if (typeof raw === 'object') {
-        return Object.keys(raw)
-          .map(k => {
-            const item = raw[k];
-            if (!item || typeof item !== 'object') return null;
-            return item.id ? item : { ...item, id: k };
-          })
-          .filter(Boolean);
-      }
-      return [];
-    }
-
-    function arrayToFirebaseMap(arr, prefix) {
-      const map = {};
-      (Array.isArray(arr) ? arr : []).forEach((item, idx) => {
-        if (!item || typeof item !== 'object') return;
-        const key = String(item.id || `${prefix}_${idx + 1}`).replace(/[.#$\[\]\/]/g, '_');
-        map[key] = { ...item, id: item.id || key };
-      });
-      return map;
-    }
-
-    function parseMoneyNumber(val) {
-      if (typeof val === 'number') return isFinite(val) ? val : 0;
-      if (val == null || typeof val === 'boolean') return 0;
-      let s = String(val).trim();
-      if (!s) return 0;
-      s = s.replace(/[\s\u00A0\u202F]/g, '').replace(/(грн\.?|uah|₴|руб\.?|usd|\$|eur|€)/gi, '');
-      if (s.includes(',') && !s.includes('.')) {
-        s = s.replace(',', '.');
-      } else if (s.includes(',') && s.includes('.')) {
-        s = s.replace(/,/g, '');
-      }
-      s = s.replace(/[^0-9.-]/g, '');
-      const n = parseFloat(s);
-      return isFinite(n) ? n : 0;
-    }
-
-    function extractOrderWorks(o) {
-      if (!o || typeof o !== 'object') return [];
-      const rawList =
-        o.works ??
-        o.services ??
-        o.repairWorks ??
-        o.jobs ??
-        o.items ??
-        o.positions ??
-        o.tasks ??
-        [];
-
-      const arr = toArrayFromFirebase(rawList);
-      const result = arr.map(w => {
-        const qty = Math.max(1, parseMoneyNumber(w.qty ?? w.quantity ?? w.count ?? 1));
-        const unitPrice = parseMoneyNumber(
-          w.price ?? w.cost ?? w.sellPrice ?? w.workPrice ?? w.rate ?? w.value ?? 0
-        );
-        const explicitTotal = parseMoneyNumber(
-          w.total ?? w.totalPrice ?? w.sum ?? w.amount ?? w.totalCost ?? 0
-        );
-        const finalItemPrice = explicitTotal > 0 ? explicitTotal : (unitPrice * qty);
-        return {
-          ...w,
-          title: String(w.title || w.name || w.service || w.description || w.work || 'Виконані роботи'),
-          price: finalItemPrice,
-          type: w.type || (w.partId || w.isPart ? 'part' : 'work')
-        };
-      });
-
-      const extraPartsRaw = o.usedParts ?? o.partsUsed ?? o.orderParts ?? null;
-      if (extraPartsRaw) {
-        toArrayFromFirebase(extraPartsRaw).forEach(p => {
-          const qty = Math.max(1, parseMoneyNumber(p.qty ?? p.quantity ?? p.count ?? 1));
-          const pPrice = parseMoneyNumber(p.total ?? p.sum ?? p.sellPrice ?? p.price ?? p.cost ?? 0);
-          result.push({
-            ...p,
-            title: String(p.title || p.name || 'Запчастина'),
-            price: (p.total || p.sum) ? pPrice : pPrice * qty,
-            type: 'part'
-          });
-        });
-      }
-
-      const worksSum = result.reduce((s, w) => s + (Number(w.price) || 0), 0);
-      if (worksSum === 0) {
-        const topLevelFinal = parseMoneyNumber(
-          o.total ??
-          o.totalPrice ??
-          o.totalSum ??
-          o.totalCost ??
-          o.totalAmount ??
-          o.finalPrice ??
-          o.finalSum ??
-          o.finalCost ??
-          o.price ??
-          o.sum ??
-          o.cost ??
-          o.amount ??
-          o.repairPrice ??
-          o.repairCost ??
-          o.repairSum ??
-          o.workPrice ??
-          o.workSum ??
-          o.worksSum ??
-          o.agreedPrice ??
-          o.agreedSum ??
-          o.paidAmount ??
-          o.paidSum ??
-          0
-        );
-        if (topLevelFinal > 0) {
-          if (result.length > 0) {
-            result[0].price = topLevelFinal;
-          } else {
-            result.push({ title: 'Виконані роботи', price: topLevelFinal, type: 'work' });
-          }
-        }
-      }
-
-      return result;
-    }
-
-    function getOrderTotal(order) {
-      if (!order) return 0;
-      const works = Array.isArray(order.works) ? order.works : toArrayFromFirebase(order.works);
-      const sum = works.reduce((s, w) => {
-        if (!w) return s;
-        return s + parseMoneyNumber(w.price ?? w.total ?? w.sum ?? w.cost ?? w.amount ?? 0);
-      }, 0);
-      if (sum > 0) return sum;
-      return parseMoneyNumber(
-        order.total ?? order.totalPrice ?? order.totalSum ?? order.finalPrice ?? order.price ?? order.sum ?? order.cost ?? 0
-      );
-    }
-
-    function getTodayPrefix() {
-      const d = new Date();
-      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-    }
-
-    function getCurrentDateTimeStr() {
-      const d = new Date();
-      return `${getTodayPrefix()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-    }
-
-    function buildValidIsoDate(year, month, day) {
-      const y = Number(year), m = Number(month), d = Number(day);
-      if (!isFinite(y) || !isFinite(m) || !isFinite(d)) return '';
-      if (y < 1990 || y > 2100 || m < 1 || m > 12 || d < 1 || d > 31) return '';
-      const dt = new Date(Date.UTC(y, m - 1, d));
-      if (dt.getUTCFullYear() !== y || (dt.getUTCMonth() + 1) !== m || dt.getUTCDate() !== d) return '';
-      return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-    }
-
-    function normalizeDateToIso(raw) {
-      if (raw == null || raw === '') return '';
-      if (raw instanceof Date && !isNaN(raw.getTime())) {
-        return buildValidIsoDate(raw.getFullYear(), raw.getMonth() + 1, raw.getDate());
-      }
-      if (typeof raw === 'number' && isFinite(raw) && raw > 0) {
-        const ms = raw < 1e11 ? raw * 1000 : raw;
-        const dt = new Date(ms);
-        if (!isNaN(dt.getTime())) {
-          return buildValidIsoDate(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate());
-        }
-        return '';
-      }
-      const s = String(raw).trim();
-      if (!s) return '';
-
-      let m = s.match(/^(\d{4})[-./](\d{1,2})[-./](\d{1,2})(?:[T\s].*)?$/);
-      if (m) return buildValidIsoDate(m[1], m[2], m[3]);
-
-      m = s.match(/^(\d{1,2})[-./](\d{1,2})[-./](\d{4})(?:[T\s].*)?$/);
-      if (m) {
-        const p1 = Number(m[1]), p2 = Number(m[2]), y = Number(m[3]);
-        if (p1 <= 12 && p2 > 12) return buildValidIsoDate(y, p1, p2);
-        return buildValidIsoDate(y, p2, p1);
-      }
-
-      m = s.match(/^(\d{1,2})[-./](\d{1,2})[-./](\d{2})(?:[T\s].*)?$/);
-      if (m) {
-        const yy = Number(m[3]);
-        const fullYear = yy <= 50 ? (2000 + yy) : (1900 + yy);
-        return buildValidIsoDate(fullYear, m[2], m[1]);
-      }
-
-      if (/^\d{9,13}$/.test(s)) {
-        const num = Number(s);
-        const ms = num < 1e11 ? num * 1000 : num;
-        const dt = new Date(ms);
-        if (!isNaN(dt.getTime())) {
-          return buildValidIsoDate(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate());
-        }
-      }
-
-      return '';
-    }
-
-    function addDaysToIsoDate(dateStr, days) {
-      const iso = normalizeDateToIso(dateStr);
-      if (!iso) return '';
-      const parts = iso.split('-').map(Number);
-      const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
-      dt.setUTCDate(dt.getUTCDate() + (Number(days) || 0));
-      return buildValidIsoDate(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate());
-    }
-
-    function formatPhoneUa(raw) {
-      let digits = String(raw || '').replace(/\D/g, '');
-      if (digits.startsWith('380')) digits = digits.slice(2);
-      else if (digits.startsWith('38') && digits.length > 2) digits = digits.slice(2);
-      digits = digits.slice(0, 10);
-      if (!digits) return '+38 ';
-      let res = '+38 ' + digits.slice(0, 3);
-      if (digits.length > 3) res += '-' + digits.slice(3, 6);
-      if (digits.length > 6) res += '-' + digits.slice(6, 8);
-      if (digits.length > 8) res += '-' + digits.slice(8, 10);
-      return res;
-    }
-
-    function showToast(msg, type = 'success') {
+    function showToast(message, type = 'success') {
       const container = document.getElementById('toast-container');
       if (!container) return;
       const el = document.createElement('div');
-      const bg = type === 'error' ? 'bg-red-600' : 'bg-[#143430]';
-      el.className = `${bg} text-white px-4 py-2.5 rounded-xl shadow-lg text-xs font-medium pointer-events-auto transition-all duration-200 max-w-sm`;
-      el.textContent = msg;
+      const isErr = type === 'error';
+      el.className = `pointer-events-auto px-4 py-3 rounded-xl shadow-lg border text-xs font-semibold transition-all duration-200 ${
+        isErr
+          ? 'bg-red-600 text-white border-red-700'
+          : 'bg-[#143430] text-white border-[#245952]'
+      }`;
+      el.textContent = message;
       container.appendChild(el);
       setTimeout(() => {
-        el.classList.add('opacity-0', 'translate-y-1');
+        el.style.opacity = '0';
+        el.style.transform = 'translateY(6px)';
         setTimeout(() => el.remove(), 220);
       }, 3200);
     }
 
-    function openModal(html, maxWidthClass = 'max-w-2xl') {
+    function openModal(innerHtml, maxWidthClass = 'max-w-2xl') {
       const root = document.getElementById('modal-root');
       const box = document.getElementById('modal-box');
       if (!root || !box) return;
       box.className = `bg-white rounded-2xl shadow-xl border border-gray-100 w-full ${maxWidthClass} overflow-hidden my-auto transform transition-all`;
-      box.innerHTML = html;
+      box.innerHTML = innerHtml;
       root.classList.remove('hidden');
       root.classList.add('flex');
     }
@@ -843,55 +633,179 @@
       if (box) box.innerHTML = '';
     }
 
+    function getTodayPrefix() {
+      const d = new Date();
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    }
+
+    function getCurrentDateTimeStr() {
+      const d = new Date();
+      return `${getTodayPrefix()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    }
+
+    function normalizeDateToIso(val) {
+      if (val === null || val === undefined || val === '') return '';
+      if (typeof val === 'number' && isFinite(val)) {
+        const ms = val < 1e12 ? val * 1000 : val;
+        const d = new Date(ms);
+        if (!isNaN(d.getTime())) {
+          return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        }
+        return '';
+      }
+      const s = String(val).trim();
+      if (!s) return '';
+      const isoMatch = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+      if (isoMatch) {
+        return `${isoMatch[1]}-${isoMatch[2].padStart(2, '0')}-${isoMatch[3].padStart(2, '0')}`;
+      }
+      const euMatch = s.match(/^(\d{1,2})[./](\d{1,2})[./](\d{4})/);
+      if (euMatch) {
+        return `${euMatch[3]}-${euMatch[2].padStart(2, '0')}-${euMatch[1].padStart(2, '0')}`;
+      }
+      if (/^\d{10,13}$/.test(s)) {
+        const num = Number(s);
+        const ms = s.length === 10 ? num * 1000 : num;
+        const d = new Date(ms);
+        if (!isNaN(d.getTime())) {
+          return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        }
+      }
+      return '';
+    }
+
+    function addDaysToIsoDate(isoDate, days) {
+      const norm = normalizeDateToIso(isoDate);
+      if (!norm) return '';
+      const parts = norm.split('-').map(Number);
+      const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+      dt.setUTCDate(dt.getUTCDate() + (Number(days) || 0));
+      return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
+    }
+
+    function parseMoneyNumber(val) {
+      if (typeof val === 'number') return isFinite(val) ? val : 0;
+      if (val === null || val === undefined) return 0;
+      const cleaned = String(val).replace(/\s+/g, '').replace(',', '.').replace(/[^\d.-]/g, '');
+      const n = parseFloat(cleaned);
+      return isFinite(n) ? n : 0;
+    }
+
+    function formatMoney(amount) {
+      const n = parseMoneyNumber(amount);
+      return `${n.toLocaleString('uk-UA', { minimumFractionDigits: 0, maximumFractionDigits: 2 })} грн`;
+    }
+
+    function getOrderTotal(order) {
+      if (!order) return 0;
+      const works = Array.isArray(order.works) ? order.works : toArrayFromFirebase(order.works);
+      if (works.length > 0) {
+        return works.reduce((acc, w) => {
+          if (!w || typeof w !== 'object') return acc;
+          const qty = Number(w.qty) || 1;
+          const unit = parseMoneyNumber(w.price ?? w.sum ?? w.cost ?? w.total ?? 0);
+          return acc + (w.total !== undefined && w.price === undefined ? unit : unit * qty);
+        }, 0);
+      }
+      return parseMoneyNumber(order.totalPrice ?? order.total ?? 0);
+    }
+
+    function formatPhoneUa(raw) {
+      const str = String(raw || '');
+      const digits = str.replace(/\D/g, '');
+      if (!digits) return '+38 ';
+      let local = digits;
+      if (local.startsWith('380')) local = local.slice(2);
+      else if (local.startsWith('38') && local.length > 2) local = local.slice(2);
+      else if (local.startsWith('80') && local.length >= 10) local = local.slice(1);
+      if (local.startsWith('0')) {
+        const d = local.slice(0, 10);
+        let res = '+38 ' + d.slice(0, 3);
+        if (d.length > 3) res += '-' + d.slice(3, 6);
+        if (d.length > 6) res += '-' + d.slice(6, 8);
+        if (d.length > 8) res += '-' + d.slice(8, 10);
+        return res;
+      }
+      return str;
+    }
+
+    function toArrayFromFirebase(val) {
+      if (!val) return [];
+      if (Array.isArray(val)) return val.filter(item => item !== null && item !== undefined);
+      if (typeof val === 'object') {
+        return Object.keys(val)
+          .map(k => {
+            const item = val[k];
+            if (item && typeof item === 'object' && item.id === undefined) {
+              return { id: k, ...item };
+            }
+            return item;
+          })
+          .filter(item => item !== null && item !== undefined);
+      }
+      return [];
+    }
+
+    function arrayToFirebaseMap(arr, prefix = 'item') {
+      const out = {};
+      if (!Array.isArray(arr)) return out;
+      arr.forEach((item, idx) => {
+        if (!item || typeof item !== 'object') return;
+        const safeKey = String(item.id || `${prefix}_${idx}`).replace(/[.#$\[\]\/]/g, '_');
+        out[safeKey] = JSON.parse(JSON.stringify(item));
+      });
+      return out;
+    }
+
     // =========================================================================
-    // 5. DEFAULT DATABASE & RECEIPT TEMPLATES
+    // 4. DATABASE SCHEMA, TEMPLATES, ROLE & PASSWORD HELPERS
     // =========================================================================
     function createDefaultReceiptTemplates() {
       return {
         intake: {
           paperFormat: 'a5',
-          orientation: 'landscape',
+          orientation: 'portrait',
           fitToA4Top: true,
           offsetTopMm: 0,
-          customWidthMm: 210,
-          customHeightMm: 148,
+          copiesPerPage: 1,
+          customWidthMm: 148,
+          customHeightMm: 210,
           marginMm: 8,
           fontSizePt: 10,
-          copiesPerPage: 1,
           printerName: '',
-          docTitle: 'КВИТАНЦІЯ ПРО ПРИЙОМ В РЕМОНТ № {order_id}',
           headerText: '{company_name}',
-          footerText: 'Дякуємо за звернення! Перевіряйте статус ремонту за телефоном.',
+          docTitle: 'Квитанція прийому в ремонт №{order_id}',
+          termsText: '1. Сервісний центр не несе відповідальності за збереження даних на носіях інформації.\n2. Пристрій приймається без розбирання та перевірки внутрішніх прихованих пошкоджень.\n3. Безкоштовне зберігання відремонтованого пристрою — 30 днів після сповіщення.',
+          footerText: 'Дякуємо за довіру! {company_name}',
           showBranch: true,
           showCompanyPhone: true,
           showCompanyAddress: true,
           showSerial: true,
           showCompleteness: true,
           showMaster: false,
-          termsText: '1. Сервісний центр не несе відповідальності за збереження даних на носіях клієнта.\n2. Безкоштовне зберігання відремонтованої техніки — 14 календарних днів.\n3. Видача техніки здійснюється лише за наявності цієї квитанції.',
           images: []
         },
         issue: {
           paperFormat: 'a5',
-          orientation: 'landscape',
+          orientation: 'portrait',
           fitToA4Top: true,
           offsetTopMm: 0,
-          customWidthMm: 210,
-          customHeightMm: 148,
+          copiesPerPage: 1,
+          customWidthMm: 148,
+          customHeightMm: 210,
           marginMm: 8,
           fontSizePt: 10,
-          copiesPerPage: 1,
           printerName: '',
-          docTitle: 'АКТ ВИКОНАНИХ РОБІТ ТА ГАРАНТІЙНИЙ ТАЛОН № {order_id}',
           headerText: '{company_name}',
-          footerText: 'Гарантія діє до {warranty_until} за умови збереження пломб.',
+          docTitle: 'Акт виконаних робіт та гарантійний талон №{order_id}',
+          warrantyText: 'Гарантія на виконані роботи та встановлені комплектуючі становить {warranty_days} днів (до {warranty_until}).\nГарантія не поширюється на механічні пошкодження, потрапляння вологи та порушення пломб.',
+          footerText: 'Претензій до якості робіт та комплектності не маю. {company_name}',
           showBranch: true,
           showCompanyPhone: true,
           showCompanyAddress: true,
           showSerial: true,
           showCompleteness: true,
           showMaster: true,
-          warrantyText: 'Гарантія поширюється виключно на замінені комплектуючі та виконані роботи строком на {warranty_days} днів (до {warranty_until}). Механічні пошкодження та сліди рідини анулюють гарантію.',
           images: []
         }
       };
@@ -905,24 +819,23 @@
       }
       db.receiptTemplates.intake = { ...defaults.intake, ...(db.receiptTemplates.intake || {}) };
       db.receiptTemplates.issue = { ...defaults.issue, ...(db.receiptTemplates.issue || {}) };
-      db.receiptTemplates.intake.images = toArrayFromFirebase(db.receiptTemplates.intake.images);
-      db.receiptTemplates.issue.images = toArrayFromFirebase(db.receiptTemplates.issue.images);
+      if (!Array.isArray(db.receiptTemplates.intake.images)) db.receiptTemplates.intake.images = [];
+      if (!Array.isArray(db.receiptTemplates.issue.images)) db.receiptTemplates.issue.images = [];
     }
 
     function getPaperDimensions(tpl) {
-      const preset = PAPER_PRESETS[tpl.paperFormat] || PAPER_PRESETS.a5;
-      let w = tpl.paperFormat === 'custom'
-        ? Math.max(40, Number(tpl.customWidthMm) || 148)
-        : preset.widthMm;
-      let h = tpl.paperFormat === 'custom'
-        ? Math.max(40, Number(tpl.customHeightMm) || 210)
-        : preset.heightMm;
-      if (tpl.orientation === 'landscape' && tpl.paperFormat !== 'custom') {
-        const tmp = w;
-        w = h;
-        h = tmp;
+      if (!tpl) return { widthMm: 148, heightMm: 210 };
+      if (tpl.paperFormat === 'custom') {
+        return {
+          widthMm: Number(tpl.customWidthMm) || 148,
+          heightMm: Number(tpl.customHeightMm) || 210
+        };
       }
-      return { widthMm: w, heightMm: h };
+      const preset = PAPER_PRESETS[tpl.paperFormat] || PAPER_PRESETS.a5;
+      if (tpl.orientation === 'landscape') {
+        return { widthMm: preset.heightMm, heightMm: preset.widthMm };
+      }
+      return { widthMm: preset.widthMm, heightMm: preset.heightMm };
     }
 
     function createEmptyDB() {
@@ -934,8 +847,7 @@
         directorPasswordHash: '',
         currentUserId: '',
         defaultWarrantyDays: 30,
-        backupFrequency: 'every_change',
-        lastAutoSnapshotAt: 0,
+        backupFrequency: '15m',
         defaultPrinterName: '',
         silentPrintEnabled: false,
         cloudUpdateUrl: '',
@@ -950,6 +862,58 @@
       };
     }
 
+    function hashPassword(raw) {
+      const str = String(raw || '');
+      let h1 = 0x811c9dc5;
+      let h2 = 0x01000193;
+      for (let i = 0; i < str.length; i++) {
+        const ch = str.charCodeAt(i);
+        h1 ^= ch;
+        h1 = Math.imul(h1, 0x01000193);
+        h2 ^= (ch + i);
+        h2 = Math.imul(h2, 0x85ebca6b);
+      }
+      return 'h_' + (h1 >>> 0).toString(16).padStart(8, '0') + (h2 >>> 0).toString(16).padStart(8, '0');
+    }
+
+    function legacySimpleHash(raw) {
+      const str = String(raw || '');
+      let h = 0;
+      for (let i = 0; i < str.length; i++) {
+        h = ((h << 5) - h) + str.charCodeAt(i);
+        h |= 0;
+      }
+      return String(h);
+    }
+
+    function verifyDirectorPassword(inputPass) {
+      const storedRaw = db.directorPasswordHash ?? db.masterPasswordHash ?? db.adminPasswordHash ?? db.directorPassword ?? db.masterPassword ?? db.adminPassword ?? '';
+      const stored = String(storedRaw).trim();
+      if (!stored) return true;
+      const val = String(inputPass || '');
+      const trimmed = val.trim();
+      if (stored.startsWith('h_')) {
+        return hashPassword(val) === stored || hashPassword(trimmed) === stored;
+      }
+      return (
+        val === stored ||
+        trimmed === stored ||
+        hashPassword(val) === stored ||
+        hashPassword(trimmed) === stored ||
+        legacySimpleHash(val) === stored ||
+        legacySimpleHash(trimmed) === stored
+      );
+    }
+
+    function isEmployeeActive(emp) {
+      if (!emp || typeof emp !== 'object') return false;
+      return emp.active !== false && emp.isActive !== false && emp.disabled !== true;
+    }
+
+    function getActiveEmployees() {
+      return (db.employees || []).filter(isEmployeeActive);
+    }
+
     function normalizeAndMigrateDB() {
       if (!db || typeof db !== 'object') db = createEmptyDB();
       db.branches = toArrayFromFirebase(db.branches);
@@ -957,132 +921,121 @@
       db.orders = toArrayFromFirebase(db.orders);
       db.clients = toArrayFromFirebase(db.clients);
       db.parts = toArrayFromFirebase(db.parts);
-      if (!db.defaultWarrantyDays) db.defaultWarrantyDays = 30;
-      if (!db.backupFrequency) db.backupFrequency = 'every_change';
 
-      const unifiedPassHash = db.directorPasswordHash || db.masterPasswordHash || db.adminPasswordHash || '';
-      if (unifiedPassHash) {
-        db.directorPasswordHash = unifiedPassHash;
-      }
+      const directorAliases = new Set([
+        'director', 'admin', 'administrator', 'owner', 'superadmin',
+        'директор', 'админ', 'адмін', 'администратор', 'адміністратор',
+        'власник', 'владелец', 'керівник', 'руководитель'
+      ]);
 
-      const empById = new Map();
-      const empByName = new Map();
-      db.employees.forEach(e => {
-        if (!e) return;
-        empById.set(String(e.id), e);
-        if (e.name) empByName.set(String(e.name).trim().toLowerCase(), e);
+      db.employees.forEach((e, idx) => {
+        if (!e || typeof e !== 'object') return;
+        if (!e.id) e.id = 'emp_' + (idx + 1);
+        const roleLow = String(e.role || '').trim().toLowerCase();
+        if (directorAliases.has(roleLow) || e.isAdmin === true || e.isDirector === true) {
+          e.role = 'director';
+        } else {
+          e.role = 'master';
+        }
+        e.active = isEmployeeActive(e);
       });
 
-      let repairedAnyDates = false;
-      const todayIso = getTodayPrefix();
+      if (db.employees.length > 0 && !db.employees.some(e => e.role === 'director')) {
+        db.employees[0].role = 'director';
+      }
 
+      const activeEmps = getActiveEmployees();
+      if (activeEmps.length === 0 && db.employees.length > 0) {
+        db.employees[0].active = true;
+      }
+
+      if (!db.currentUserId || !getActiveEmployees().some(e => String(e.id) === String(db.currentUserId))) {
+        const firstEmp = getActiveEmployees()[0] || db.employees[0];
+        db.currentUserId = firstEmp ? firstEmp.id : '';
+      }
+
+      let repaired = false;
       db.orders.forEach(o => {
-        if (!o) return;
-
-        o.works = extractOrderWorks(o);
-        o.estimatedPrice = parseMoneyNumber(o.estimatedPrice ?? o.estPrice ?? o.approxPrice ?? 0);
-
-        if (o.masterId && empById.has(String(o.masterId))) {
-          o.masterName = empById.get(String(o.masterId)).name;
-        } else if (o.masterName && empByName.has(String(o.masterName).trim().toLowerCase())) {
-          const matched = empByName.get(String(o.masterName).trim().toLowerCase());
-          o.masterId = matched.id;
-          o.masterName = matched.name;
-        } else if (o.master) {
-          const rawM = String(o.master).trim();
-          const matched = empById.get(rawM) || empByName.get(rawM.toLowerCase());
-          if (matched) {
-            o.masterId = matched.id;
-            o.masterName = matched.name;
-          } else {
-            o.masterName = rawM;
+        if (!o || typeof o !== 'object') return;
+        if (!Array.isArray(o.works)) o.works = toArrayFromFirebase(o.works);
+        if (o.issuedDate) {
+          const norm = normalizeDateToIso(o.issuedDate);
+          if (norm && norm !== o.issuedDate) {
+            o.issuedDate = norm;
+            repaired = true;
           }
         }
-
-        const rawIssued = o.issuedDate ?? o.issueDate ?? o.dateIssued ?? o.closedAt ?? o.completedAt ?? '';
-        const normIssued = normalizeDateToIso(rawIssued);
-        if (normIssued && o.issuedDate !== normIssued) {
-          o.issuedDate = normIssued;
-          repairedAnyDates = true;
-        }
-
-        const rawUntil = o.warrantyUntil ?? o.warrantyEnd ?? o.warrantyDate ?? o.guaranteeUntil ?? '';
-        let normUntil = normalizeDateToIso(rawUntil);
-        const wDays = Math.max(0, Number(o.warrantyDays ?? o.guaranteeDays ?? 0) || 0);
-
-        if (o.status === 'issued') {
-          if (normIssued && wDays > 0) {
-            const expectedUntil = addDaysToIsoDate(normIssued, wDays);
-            if (expectedUntil && (!normUntil || normUntil === todayIso || normUntil !== expectedUntil)) {
-              normUntil = expectedUntil;
-            }
-          } else if (!normIssued && !normUntil && wDays > 0 && o.createdAt) {
-            const normCreated = normalizeDateToIso(o.createdAt);
-            if (normCreated && normCreated < todayIso) {
-              o.issuedDate = normCreated;
-              normUntil = addDaysToIsoDate(normCreated, wDays);
-            }
-          }
-        }
-
-        if ((o.warrantyUntil || '') !== normUntil) {
-          o.warrantyUntil = normUntil;
-          repairedAnyDates = true;
+        if (o.status === 'issued' && o.issuedDate && Number(o.warrantyDays) > 0 && !o.warrantyUntil) {
+          o.warrantyUntil = addDaysToIsoDate(o.issuedDate, Number(o.warrantyDays));
+          repaired = true;
         }
       });
 
-      if (db.employees.length > 0 && !db.employees.some(e => e.id === db.currentUserId)) {
-        const defaultMaster = db.employees.find(e => e.role === 'master');
-        db.currentUserId = (defaultMaster || db.employees[0]).id;
-      }
+      return repaired;
+    }
 
-      return repairedAnyDates;
+    function getCurrentUser() {
+      if (!db || !Array.isArray(db.employees) || db.employees.length === 0) {
+        return { id: '', name: 'Користувач', role: 'director' };
+      }
+      return db.employees.find(e => String(e.id) === String(db.currentUserId)) || db.employees[0];
+    }
+
+    function isDirector() {
+      return getCurrentUser().role === 'director';
+    }
+
+    function requireDirectorAccess() {
+      if (isDirector()) return true;
+      showToast(t('accessDeniedDirector'), 'error');
+      return false;
     }
 
     // =========================================================================
-    // 6. STORAGE ENGINE (LOCALSTORAGE + ELECTRON BACKUP FOLDER)
+    // 5. STORAGE ENGINE, PRINTER MANAGER & CLOUD UPDATER
     // =========================================================================
     const StorageEngine = {
       isElectron: Boolean(window.electronAPI && window.electronAPI.isElectron),
       backupDir: '',
-      _saveTimer: null,
+      _lastSnapshotTs: 0,
 
       async init() {
-        let loaded = null;
-        if (this.isElectron && window.electronAPI.loadDB) {
-          try {
+        try {
+          if (this.isElectron && window.electronAPI.loadDB) {
             const res = await window.electronAPI.loadDB();
-            if (res && res.ok) {
-              this.backupDir = res.backupDir || '';
-              if (res.data && typeof res.data === 'object') loaded = res.data;
+            if (res && res.backupDir) this.backupDir = res.backupDir;
+            if (res && res.ok && res.data && typeof res.data === 'object') {
+              db = { ...createEmptyDB(), ...res.data };
+              return;
             }
-          } catch (e) {
-            console.warn('Electron loadDB error:', e);
           }
+        } catch (e) {
+          console.error('Electron loadDB error:', e);
         }
-        if (!loaded) {
-          try {
-            const raw = localStorage.getItem(STORAGE_KEY);
-            if (raw) loaded = JSON.parse(raw);
-          } catch (e) {}
+
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          if (raw) {
+            db = { ...createEmptyDB(), ...JSON.parse(raw) };
+            return;
+          }
+        } catch (e) {
+          console.error('localStorage load error:', e);
         }
-        db = loaded ? { ...createEmptyDB(), ...loaded } : createEmptyDB();
-        if (db.companyName && db.employees && toArrayFromFirebase(db.employees).length > 0) {
-          db.initialized = true;
-        }
+
+        db = createEmptyDB();
       },
 
-      shouldMakeSnapshot(force) {
+      shouldCreateSnapshot(force) {
         if (force) return true;
-        const freq = db.backupFrequency || 'every_change';
+        const freq = db.backupFrequency || '15m';
         if (freq === 'manual') return false;
         if (freq === 'every_change') return true;
         const now = Date.now();
-        const last = Number(db.lastAutoSnapshotAt) || 0;
         const intervals = { '15m': 15 * 60 * 1000, '1h': 60 * 60 * 1000, 'daily': 24 * 60 * 60 * 1000 };
-        const diff = intervals[freq] || 0;
-        if (now - last >= diff) {
-          db.lastAutoSnapshotAt = now;
+        const wait = intervals[freq] || 15 * 60 * 1000;
+        if (now - this._lastSnapshotTs >= wait) {
+          this._lastSnapshotTs = now;
           return true;
         }
         return false;
@@ -1091,119 +1044,102 @@
       save(forceSnapshot = false) {
         try {
           localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
-        } catch (e) {}
-
+        } catch (e) {
+          console.error('localStorage save error:', e);
+        }
         if (this.isElectron && window.electronAPI.saveDB) {
-          const snap = this.shouldMakeSnapshot(forceSnapshot);
-          clearTimeout(this._saveTimer);
-          this._saveTimer = setTimeout(async () => {
-            try {
-              const res = await window.electronAPI.saveDB(db, snap);
-              if (res && res.backupDir) this.backupDir = res.backupDir;
-            } catch (e) {}
-          }, forceSnapshot ? 10 : 250);
+          const snap = this.shouldCreateSnapshot(forceSnapshot);
+          window.electronAPI.saveDB(db, snap).catch(err => console.error('Electron saveDB error:', err));
         }
       }
     };
 
-    function saveDB(forceBackupSnapshot = false) {
-      StorageEngine.save(forceBackupSnapshot);
-      if (typeof FirebaseSync !== 'undefined' && FirebaseSync.connected && !FirebaseSync.isApplyingRemote && db.initialized) {
-        FirebaseSync.schedulePush();
-      }
+    function saveDB(forceSnapshot = false) {
+      StorageEngine.save(forceSnapshot);
+      FirebaseSync.schedulePush();
     }
 
-    // =========================================================================
-    // 7. PRINTER MANAGER & CLOUD OTA UPDATER
-    // =========================================================================
     const PrinterManager = {
       printers: [],
-      async refresh(silent = false) {
+      async refresh(silent = true) {
         if (!StorageEngine.isElectron || !window.electronAPI.getPrinters) return;
         try {
           const res = await window.electronAPI.getPrinters();
-          if (res && res.ok) {
-            this.printers = res.printers || [];
+          if (res && res.ok && Array.isArray(res.printers)) {
+            this.printers = res.printers;
             if (!silent) showToast(`Знайдено принтерів: ${this.printers.length}`);
           }
-        } catch (e) {}
+        } catch (e) {
+          if (!silent) showToast('Не вдалося отримати список принтерів', 'error');
+        }
       }
     };
 
     function renderPrinterOptions(selectedName) {
-      return (PrinterManager.printers || []).map(p => {
-        const name = p.name || p.displayName || '';
-        return `<option value="${escapeHtml(name)}" ${selectedName === name ? 'selected' : ''}>${escapeHtml(p.displayName || name)}</option>`;
-      }).join('');
+      const names = new Set((PrinterManager.printers || []).map(p => p.name).filter(Boolean));
+      if (selectedName) names.add(selectedName);
+      return Array.from(names).map(name =>
+        `<option value="${escapeHtml(name)}" ${name === selectedName ? 'selected' : ''}>${escapeHtml(name)}</option>`
+      ).join('');
     }
 
     const CloudUpdater = {
-      pendingHtml: null,
+      pendingHtml: '',
       pendingVersion: '',
 
       normalizeUpdateUrl(rawUrl) {
         let u = String(rawUrl || '').trim();
-        u = u.replace(/^https?:\/\/github\.com\/([^\/]+)\/([^\/]+)\/(?:blob|raw)\/(.+)$/i, 'https://raw.githubusercontent.com/$1/$2/$3');
-        const repoOnly = u.match(/^https?:\/\/github\.com\/([^\/]+)\/([^\/?#]+)\/?$/i);
-        if (repoOnly) {
-          u = `https://raw.githubusercontent.com/${repoOnly[1]}/${repoOnly[2]}/main/index.html`;
+        if (!u) return '';
+        if (u.includes('github.com/') && u.includes('/blob/')) {
+          u = u.replace('https://github.com/', 'https://raw.githubusercontent.com/').replace('/blob/', '/');
         }
         return u;
       },
 
-      async checkForUpdates(silent = false) {
-        let url = this.normalizeUpdateUrl(db.cloudUpdateUrl);
+      extractVersion(html) {
+        const m = String(html || '').match(/const\s+APP_VERSION\s*=\s*['"]([^'"]+)['"]/);
+        return m ? m[1].trim() : '';
+      },
+
+      compareVersions(a, b) {
+        const pa = String(a || '0').split('.').map(n => parseInt(n, 10) || 0);
+        const pb = String(b || '0').split('.').map(n => parseInt(n, 10) || 0);
+        const len = Math.max(pa.length, pb.length);
+        for (let i = 0; i < len; i++) {
+          const va = pa[i] || 0;
+          const vb = pb[i] || 0;
+          if (va > vb) return 1;
+          if (va < vb) return -1;
+        }
+        return 0;
+      },
+
+      async checkForUpdates(silent = true) {
+        const url = this.normalizeUpdateUrl(db.cloudUpdateUrl);
         if (!url) {
-          if (!silent) showToast('Вкажіть URL оновлення у налаштуваннях!', 'error');
+          if (!silent) showToast('Вкажіть URL хмарного оновлення у налаштуваннях!', 'error');
           return;
         }
         try {
           const sep = url.includes('?') ? '&' : '?';
-          let resp = await fetch(url + sep + '_t=' + Date.now(), { cache: 'no-store' });
-          if (!resp.ok && url.includes('/main/index.html')) {
-            const masterUrl = url.replace('/main/index.html', '/master/index.html');
-            const respMaster = await fetch(masterUrl + sep + '_t=' + Date.now(), { cache: 'no-store' });
-            if (respMaster.ok) resp = respMaster;
+          const resp = await fetch(`${url}${sep}_t=${Date.now()}`, { cache: 'no-store' });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+          const html = await resp.text();
+          const remoteVer = this.extractVersion(html);
+          if (!remoteVer || !html.includes('</html>')) {
+            throw new Error('Файл за посиланням не є коректною збіркою CRM');
           }
-          if (!resp.ok) throw new Error('HTTP ' + resp.status);
-          const text = await resp.text();
-          let htmlContent = '';
-          let newVer = '';
-          let notes = '';
-
-          if (text.trim().startsWith('{')) {
-            const manifest = JSON.parse(text);
-            newVer = String(manifest.version || '').trim();
-            notes = String(manifest.notes || '');
-            if (newVer && newVer === APP_VERSION) {
-              if (!silent) showToast(`Встановлена найновіша версія (${APP_VERSION})`);
-              return;
-            }
-            if (!manifest.url) throw new Error('У маніфесті відсутнє поле url');
-            const htmlResp = await fetch(manifest.url + (manifest.url.includes('?') ? '&' : '?') + '_t=' + Date.now(), { cache: 'no-store' });
-            if (!htmlResp.ok) throw new Error('Не вдалося завантажити HTML: ' + htmlResp.status);
-            htmlContent = await htmlResp.text();
-          } else if (text.includes('<!DOCTYPE html>') || text.includes('<html')) {
-            htmlContent = text;
-            const m = text.match(/APP_VERSION\s*=\s*['"]([^'"]+)['"]/);
-            newVer = m ? m[1] : 'Нова';
-            if (newVer === APP_VERSION) {
-              if (!silent) showToast(`Встановлена найновіша версія (${APP_VERSION})`);
-              return;
-            }
-          } else {
-            throw new Error('Невідомий формат файлу оновлення');
+          if (this.compareVersions(remoteVer, APP_VERSION) > 0) {
+            this.pendingHtml = html;
+            this.pendingVersion = remoteVer;
+            const banner = document.getElementById('cloud-update-banner');
+            const title = document.getElementById('cloud-update-title');
+            if (title) title.textContent = `Доступне оновлення CRM v${remoteVer}!`;
+            if (banner) banner.classList.remove('hidden');
+            if (!silent) showToast(`Знайдено нову версію v${remoteVer}!`);
+          } else if (!silent) {
+            showToast(`У вас встановлена найновіша версія (v${APP_VERSION})`);
           }
-
-          this.pendingHtml = htmlContent;
-          this.pendingVersion = newVer;
-          const banner = document.getElementById('cloud-update-banner');
-          const titleEl = document.getElementById('cloud-update-title');
-          const notesEl = document.getElementById('cloud-update-notes');
-          if (titleEl) titleEl.textContent = `Доступне оновлення v${newVer}!`;
-          if (notesEl && notes) notesEl.textContent = notes;
-          if (banner) banner.classList.remove('hidden');
-          if (!silent) showToast(`Знайдено оновлення v${newVer}!`);
         } catch (err) {
           if (!silent) showToast('Помилка перевірки оновлень: ' + err.message, 'error');
         }
@@ -1214,40 +1150,35 @@
         if (StorageEngine.isElectron && window.electronAPI.applyHotUpdate) {
           const res = await window.electronAPI.applyHotUpdate(this.pendingHtml);
           if (res && res.ok) {
-            showToast('Оновлення застосовано! Перезавантаження...');
+            showToast(`Оновлено до v${this.pendingVersion}! Перезавантаження...`);
             setTimeout(() => window.location.reload(), 600);
           } else {
             showToast((res && res.error) || 'Помилка запису оновлення', 'error');
           }
         } else {
-          const blob = new Blob([this.pendingHtml], { type: 'text/html;charset=utf-8' });
-          const a = document.createElement('a');
-          a.href = URL.createObjectURL(blob);
-          a.download = 'index.html';
-          a.click();
-          showToast('Новий index.html завантажено (у браузері замініть файл вручну).');
+          showToast('Автооновлення інтерфейсу працює у Windows-програмі (.exe). Завантажте новий index.html у браузер.', 'error');
         }
       },
 
       async applyManualFile(file) {
         if (!file) return;
+        if (!StorageEngine.isElectron || !window.electronAPI.applyHotUpdate) {
+          showToast('Оновлення з файлу доступне у Windows-програмі (.exe)', 'error');
+          return;
+        }
         const reader = new FileReader();
         reader.onload = async () => {
           const html = String(reader.result || '');
-          if (!html.includes('<html')) {
-            showToast('Обраний файл не є коректним HTML інтерфейсом CRM', 'error');
+          if (!html.includes('APP_VERSION') || !html.includes('</html>')) {
+            showToast('Обраний файл не є коректним файлом CRM!', 'error');
             return;
           }
-          if (StorageEngine.isElectron && window.electronAPI.applyHotUpdate) {
-            const res = await window.electronAPI.applyHotUpdate(html);
-            if (res && res.ok) {
-              showToast('Код оновлено! Перезавантаження...');
-              setTimeout(() => window.location.reload(), 600);
-            } else {
-              showToast((res && res.error) || 'Помилка оновлення', 'error');
-            }
+          const res = await window.electronAPI.applyHotUpdate(html);
+          if (res && res.ok) {
+            showToast('Інтерфейс успішно оновлено! Перезавантаження...');
+            setTimeout(() => window.location.reload(), 600);
           } else {
-            showToast('Оновлення з файлу працює у Windows програмі (.exe). У браузері просто відкрийте новий файл.', 'error');
+            showToast((res && res.error) || 'Не вдалося оновити файл', 'error');
           }
         };
         reader.readAsText(file);
@@ -1255,15 +1186,17 @@
     };
 
     // =========================================================================
-    // 8. FIRST-RUN SETUP, LANGUAGE & SIDEBAR NAVIGATION
+    // 6. FIRST-RUN SETUP & SHELL UI RENDERING
     // =========================================================================
     function checkFirstRunSetup() {
-      const setupScreen = document.getElementById('setup-screen');
-      if (!setupScreen) return;
-      if (!db.initialized) {
-        setupScreen.classList.remove('hidden');
+      const screen = document.getElementById('setup-screen');
+      if (!screen) return;
+      const hasData = Boolean(db.initialized) || (db.orders && db.orders.length > 0) || (db.employees && db.employees.length > 0);
+      if (hasData) {
+        db.initialized = true;
+        screen.classList.add('hidden');
       } else {
-        setupScreen.classList.add('hidden');
+        screen.classList.remove('hidden');
       }
     }
 
@@ -1279,41 +1212,56 @@
         showToast('Паролі не співпадають!', 'error');
         return;
       }
+      if (pass1.length < 4) {
+        showToast('Майстер-пароль має містити мінімум 4 символи!', 'error');
+        return;
+      }
 
       const branchId = 'br_' + Date.now();
-      const dirId = 'emp_dir_' + Date.now();
+      const dirId = 'emp_' + Date.now();
+
       db = createEmptyDB();
       db.initialized = true;
       db.companyName = companyName;
       db.directorPasswordHash = hashPassword(pass1);
-      db.currentUserId = dirId;
-      db.branches = [{ id: branchId, name: branchName, address: '', phone: '' }];
+      db.branches = [{ id: branchId, name: branchName }];
       db.employees = [{
         id: dirId,
         name: directorName,
         role: 'director',
         salaryType: 'percent_works',
-        salaryValue: 50,
-        phone: ''
+        salaryValue: 50
       }];
+      db.currentUserId = dirId;
 
       saveDB(true);
-      document.getElementById('setup-screen').classList.add('hidden');
+      document.getElementById('setup-screen')?.classList.add('hidden');
       refreshShellUI();
       renderWorkspace();
-      showToast('Базу створено! Ласкаво просимо до CRM.');
+      showToast('Базу сервісного центру успішно створено!');
     }
 
     function setLang(lang) {
       currentLang = lang === 'ru' ? 'ru' : 'ua';
-      ['lang-ua', 'setup-lang-ua'].forEach(id => {
-        const el = document.getElementById(id);
-        if (el) el.className = currentLang === 'ua' ? 'px-2.5 py-1 bg-[#1c6457] text-white' : 'px-2.5 py-1 bg-white text-gray-600';
+      try { localStorage.setItem('sc_crm_lang', currentLang); } catch (e) {}
+      const uaBtn = document.getElementById('lang-ua');
+      const ruBtn = document.getElementById('lang-ru');
+      const sUaBtn = document.getElementById('setup-lang-ua');
+      const sRuBtn = document.getElementById('setup-lang-ru');
+
+      [uaBtn, sUaBtn].forEach(b => {
+        if (!b) return;
+        b.className = currentLang === 'ua'
+          ? 'px-2.5 py-1 bg-[#1c6457] text-white transition-colors'
+          : 'px-2.5 py-1 bg-white text-gray-600 hover:bg-gray-50 transition-colors';
       });
-      ['lang-ru', 'setup-lang-ru'].forEach(id => {
-        const el = document.getElementById(id);
-        if (el) el.className = currentLang === 'ru' ? 'px-2.5 py-1 bg-[#1c6457] text-white' : 'px-2.5 py-1 bg-white text-gray-600';
+      [ruBtn, sRuBtn].forEach(b => {
+        if (!b) return;
+        b.className = currentLang === 'ru'
+          ? 'px-2.5 py-1 bg-[#1c6457] text-white transition-colors'
+          : 'px-2.5 py-1 bg-white text-gray-600 hover:bg-gray-50 transition-colors';
       });
+
       document.querySelectorAll('[data-i18n]').forEach(el => {
         el.textContent = t(el.getAttribute('data-i18n'));
       });
@@ -1443,9 +1391,75 @@
       }).join('');
     }
 
+    // Normalize text once for all local search fields. Numeric queries
+    // also match phone numbers regardless of spaces, dashes or parentheses.
+    function normalizeSearchText(value) {
+      return String(value == null ? '' : value)
+        .toLocaleLowerCase('uk-UA')
+        .normalize('NFKD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
+    function searchTextMatches(query, fields) {
+      const normalizedQuery = normalizeSearchText(query);
+      if (!normalizedQuery) return true;
+      const values = (Array.isArray(fields) ? fields : [fields]).filter(v => v != null).map(v => String(v));
+      const text = normalizeSearchText(values.join(' '));
+      const digits = values.join('').replace(/\D/g, '');
+      const terms = normalizedQuery.split(/\s+/).filter(Boolean);
+      return terms.every(term => text.includes(term) || (/^\d+$/.test(term) && digits.includes(term)));
+    }
+
+    // Re-render the current section without losing the search input focus,
+    // caret position or current list scroll position.
+    function renderWorkspacePreservingInput(inputId) {
+      const oldInput = document.getElementById(inputId);
+      const start = oldInput && typeof oldInput.selectionStart === 'number' ? oldInput.selectionStart : null;
+      const end = oldInput && typeof oldInput.selectionEnd === 'number' ? oldInput.selectionEnd : null;
+      const direction = oldInput && oldInput.selectionDirection ? oldInput.selectionDirection : 'none';
+      const ws = document.getElementById('workspace');
+      const workspaceScrollTop = ws ? ws.scrollTop : 0;
+      const oldList = ws && ws.querySelector('.orders-list-scroll');
+      const listScrollTop = oldList ? oldList.scrollTop : 0;
+
+      renderWorkspace();
+
+      const nextInput = document.getElementById(inputId);
+      if (nextInput) {
+        nextInput.focus({ preventScroll: true });
+        if (start !== null && end !== null && typeof nextInput.setSelectionRange === 'function') {
+          try { nextInput.setSelectionRange(start, end, direction); } catch (e) {}
+        }
+      }
+      if (ws) ws.scrollTop = workspaceScrollTop;
+      const nextList = ws && ws.querySelector('.orders-list-scroll');
+      if (nextList) nextList.scrollTop = listScrollTop;
+    }
+
+    function handleOrdersSearchInput(input) {
+      ordersSearch = input.value;
+      ordersPageLimit = 100;
+      renderWorkspacePreservingInput('orders-search-input');
+    }
+
+    function handleClientsSearchInput(input) {
+      clientsSearch = input.value;
+      clientsPageLimit = 100;
+      renderWorkspacePreservingInput('clients-search-input');
+    }
+
+    function handlePartsSearchInput(input) {
+      partsSearch = input.value;
+      partsPageLimit = 100;
+      renderWorkspacePreservingInput('parts-search-input');
+    }
+
     function renderWorkspace() {
       const ws = document.getElementById('workspace');
       if (!ws) return;
+      ws.classList.toggle('workspace-orders', currentView === 'orders');
       if (currentView === 'orders') renderOrdersView(ws);
       else if (currentView === 'clients') renderClientsView(ws);
       else if (currentView === 'warehouse') renderWarehouseView(ws);
@@ -1516,7 +1530,11 @@
         }
       });
 
+      const q = ordersSearch.trim();
       let tabList = branchFiltered.filter(o => {
+        if (q) {
+          return !o.deleted || isDirector();
+        }
         if (ordersTab === 'deleted') return Boolean(o.deleted);
         if (o.deleted) return false;
         if (ordersTab === 'for_issue') return o.status === 'ready' || o.status === 'cancelled' || o.status === 'no_repair';
@@ -1525,16 +1543,12 @@
         return o.status !== 'issued' && o.status !== 'ready' && o.status !== 'cancelled' && o.status !== 'no_repair';
       });
 
-      const q = ordersSearch.trim().toLowerCase();
       if (q) {
-        tabList = tabList.filter(o =>
-          String(o.id || '').toLowerCase().includes(q) ||
-          String(o.clientName || '').toLowerCase().includes(q) ||
-          String(o.clientPhone || '').toLowerCase().includes(q) ||
-          String(o.device || '').toLowerCase().includes(q) ||
-          String(o.serial || '').toLowerCase().includes(q) ||
-          String(o.problem || '').toLowerCase().includes(q)
-        );
+        tabList = tabList.filter(o => searchTextMatches(q, [
+          o.id, o.createdAt, o.clientName, o.clientPhone, String(o.clientPhone || '').replace(/\D/g, ''),
+          o.device, o.serial, o.problem, o.completeness, o.description, o.masterName,
+          ...(Array.isArray(o.works) ? o.works.map(w => w && (w.title || w.name)) : [])
+        ]));
       }
       if (ordersStatusFilter !== 'all') {
         tabList = tabList.filter(o => o.status === ordersStatusFilter);
@@ -1566,8 +1580,8 @@
       const sortArrow = (f) => ordersSortField === f ? (ordersSortDir === 'asc' ? ' ↑' : ' ↓') : '';
 
       ws.innerHTML = `
-        <div class="space-y-4">
-          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div class="orders-page">
+          <div class="orders-fixed-block flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <h1 class="text-xl font-bold text-gray-900">${escapeHtml(t('ordersTitle'))}</h1>
               <p class="text-xs text-gray-500">${escapeHtml(t('ordersSubtitle'))}</p>
@@ -1578,7 +1592,7 @@
           </div>
 
           <!-- KPI CARDS -->
-          <div class="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+          <div class="orders-fixed-block grid grid-cols-2 sm:grid-cols-5 gap-2.5">
             <div onclick="ordersTab='active'; ordersStatusFilter='all'; renderWorkspace();" class="bg-white p-3.5 rounded-2xl border border-gray-100 shadow-2xs cursor-pointer hover:border-teal-300 transition-colors">
               <div class="text-lg font-extrabold text-gray-900">${cntActive}</div>
               <div class="text-[11px] text-gray-500 font-medium">${escapeHtml(t('kpiTotal'))}</div>
@@ -1602,7 +1616,7 @@
           </div>
 
           <!-- TABS -->
-          <div class="flex flex-wrap items-center gap-1.5 border-b border-gray-200 pb-2">
+          <div class="orders-fixed-block flex flex-wrap items-center gap-1.5 border-b border-gray-200 pb-2">
             ${[
               { id: 'active', label: t('tabActiveRepairs'), count: cntActive },
               { id: 'for_issue', label: t('tabForIssue'), count: cntForIssue },
@@ -1610,7 +1624,7 @@
               { id: 'archive', label: t('tabArchive'), count: cntArchive },
               ...(isDirector() ? [{ id: 'deleted', label: t('tabDeleted'), count: cntDeleted }] : [])
             ].map(tab => `
-              <button onclick="ordersTab='${tab.id}'; ordersPageLimit=100; renderWorkspace();" class="px-3.5 py-2 rounded-xl text-xs font-semibold transition-colors inline-flex items-center gap-1.5 ${ordersTab === tab.id ? 'bg-[#143430] text-white' : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'}">
+              <button onclick="ordersTab='${tab.id}'; ordersSearch=''; ordersPageLimit=100; renderWorkspace();" class="px-3.5 py-2 rounded-xl text-xs font-semibold transition-colors inline-flex items-center gap-1.5 ${ordersTab === tab.id ? 'bg-[#143430] text-white' : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'}">
                 <span>${escapeHtml(tab.label)}</span>
                 <span class="px-1.5 py-0.5 rounded-md text-[10px] ${ordersTab === tab.id ? 'bg-[#245952] text-[#4fd1b5]' : 'bg-gray-100 text-gray-600'}">${tab.count}</span>
               </button>
@@ -1618,9 +1632,10 @@
           </div>
 
           <!-- SEARCH & FILTERS -->
-          <div class="bg-white p-3.5 rounded-2xl border border-gray-100 shadow-2xs flex flex-col md:flex-row gap-2.5">
-            <div class="flex-1">
-              <input value="${escapeHtml(ordersSearch)}" oninput="clearTimeout(_searchDebounceTimer); const v=this.value; _searchDebounceTimer=setTimeout(()=>{ ordersSearch=v; ordersPageLimit=100; renderWorkspace(); }, 180);" placeholder="${escapeHtml(t('searchPlaceholder'))}" class="w-full rounded-xl border border-gray-200 px-3.5 py-2 text-xs focus:outline-none focus:border-[#1c6457]" />
+          <div class="orders-fixed-block bg-white p-3.5 rounded-2xl border border-gray-100 shadow-2xs flex flex-col md:flex-row gap-2.5">
+            <div class="flex-1 relative flex items-center">
+              <input id="orders-search-input" value="${escapeHtml(ordersSearch)}" oninput="handleOrdersSearchInput(this)" placeholder="${escapeHtml(t('searchPlaceholder'))}" class="w-full rounded-xl border border-gray-200 px-3.5 ${q ? 'pr-8' : ''} py-2 text-xs focus:outline-none focus:border-[#1c6457]" />
+              ${q ? `<button type="button" onclick="ordersSearch=''; ordersPageLimit=100; renderWorkspace();" title="Очистити пошук" class="absolute right-2.5 text-gray-400 hover:text-gray-700 font-bold text-xs">✕</button>` : ''}
             </div>
             <select onchange="ordersStatusFilter=this.value; renderWorkspace();" class="rounded-xl border border-gray-200 px-3 py-2 text-xs bg-white">
               <option value="all">Усі статуси</option>
@@ -1628,13 +1643,13 @@
             </select>
             <select onchange="ordersMasterFilter=this.value; renderWorkspace();" class="rounded-xl border border-gray-200 px-3 py-2 text-xs bg-white">
               <option value="all">Усі майстри</option>
-              ${(db.employees || []).map(emp => `<option value="${escapeHtml(emp.id)}" ${ordersMasterFilter === emp.id ? 'selected' : ''}>${escapeHtml(emp.name)}</option>`).join('')}
+              ${getActiveEmployees().map(emp => `<option value="${escapeHtml(emp.id)}" ${ordersMasterFilter === emp.id ? 'selected' : ''}>${escapeHtml(emp.name)}</option>`).join('')}
             </select>
           </div>
 
           <!-- TABLE -->
-          <div class="bg-white rounded-2xl border border-gray-100 shadow-2xs overflow-x-auto">
-            <table class="w-full text-left border-collapse text-xs">
+          <div class="orders-list-scroll bg-white rounded-2xl border border-gray-100 shadow-2xs overflow-auto">
+            <table class="w-full min-w-[1050px] text-left border-collapse text-xs">
               <thead>
                 <tr class="border-b border-gray-100 bg-gray-50/70 text-[11px] uppercase tracking-wider text-gray-500">
                   <th onclick="toggleOrdersSort('id')" class="py-3 px-3.5 cursor-pointer hover:text-gray-900 select-none">${escapeHtml(t('colNumDate'))}${sortArrow('id')}</th>
@@ -1671,6 +1686,16 @@
       const warrantyUntil = getWarrantyUntilDate(order);
       const activeWarranty = isOrderOnWarranty(order);
       const normIssued = normalizeDateToIso(order.issuedDate) || order.issuedDate || '';
+      const isGlobalTabSearch = Boolean(ordersSearch.trim());
+      let tabBadge = '';
+      if (isGlobalTabSearch) {
+        if (order.deleted) tabBadge = `<span class="px-1.5 py-0.5 rounded bg-red-100 text-red-700 text-[10px] font-bold">${escapeHtml(t('tabDeleted'))}</span>`;
+        else if (order.status === 'issued') tabBadge = activeWarranty
+          ? `<span class="px-1.5 py-0.5 rounded bg-teal-50 text-teal-800 border border-teal-200 text-[10px] font-semibold">${escapeHtml(t('tabWarranty'))}</span>`
+          : `<span class="px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 text-[10px] font-semibold">${escapeHtml(t('tabArchive'))}</span>`;
+        else if (order.status === 'ready' || order.status === 'cancelled' || order.status === 'no_repair') tabBadge = `<span class="px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200 text-[10px] font-semibold">${escapeHtml(t('tabForIssue'))}</span>`;
+        else tabBadge = `<span class="px-1.5 py-0.5 rounded bg-sky-50 text-sky-800 border border-sky-200 text-[10px] font-semibold">${escapeHtml(t('tabActiveRepairs'))}</span>`;
+      }
 
       return `
         <tr onclick="openOrderModal('${escapeHtml(order.id)}')" class="${rowBg} cursor-pointer transition-colors">
@@ -1678,6 +1703,7 @@
             <div class="font-bold text-gray-900">#${escapeHtml(order.id)}</div>
             <div class="text-[11px] text-gray-400">${escapeHtml(String(order.createdAt || '').slice(0, 16))}</div>
             <div class="flex flex-wrap gap-1 mt-1">
+              ${tabBadge}
               ${order.urgent ? `<span class="px-1.5 py-0.5 rounded bg-red-100 text-red-700 text-[10px] font-bold">${escapeHtml(t('urgentTag'))}</span>` : ''}
               ${order.warrantyReturnFrom ? `<span class="px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 text-[10px] font-bold">${escapeHtml(t('warrantyReturnTag'))}</span>` : ''}
               ${order.approved ? `<span class="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] font-bold">${escapeHtml(t('approvedTag'))}</span>` : ''}
@@ -1789,7 +1815,7 @@
                 <label class="block font-semibold text-gray-700 mb-1">Майстер</label>
                 <select id="co-master" class="w-full rounded-xl border border-gray-200 px-3 py-2 bg-white">
                   <option value="">Не призначено</option>
-                  ${(db.employees || []).map(emp => `<option value="${escapeHtml(emp.id)}">${escapeHtml(emp.name)}</option>`).join('')}
+                  ${getActiveEmployees().map(emp => `<option value="${escapeHtml(emp.id)}">${escapeHtml(emp.name)}</option>`).join('')}
                 </select>
               </div>
               <label class="inline-flex items-center gap-2 py-2.5 px-3 rounded-xl border border-gray-200 cursor-pointer">
@@ -1971,7 +1997,14 @@
               <label class="block text-[11px] font-semibold text-gray-600 mb-1">Майстер</label>
               <select onchange="updateOrderMaster('${escapeHtml(order.id)}', this.value)" class="w-full rounded-xl border border-gray-200 px-3 py-2 bg-white font-semibold">
                 <option value="">Не призначено</option>
-                ${(db.employees || []).map(emp => `<option value="${escapeHtml(emp.id)}" ${String(order.masterId) === String(emp.id) ? 'selected' : ''}>${escapeHtml(emp.name)}</option>`).join('')}
+                ${(() => {
+                  const activeList = getActiveEmployees();
+                  const assignedEmp = order.masterId ? (db.employees || []).find(e => String(e.id) === String(order.masterId)) : null;
+                  const extraInactive = assignedEmp && !isEmployeeActive(assignedEmp) ? [assignedEmp] : [];
+                  return [...activeList, ...extraInactive].map(emp =>
+                    `<option value="${escapeHtml(emp.id)}" ${String(order.masterId) === String(emp.id) ? 'selected' : ''}>${escapeHtml(emp.name)}${!isEmployeeActive(emp) ? ' (вимкнений)' : ''}</option>`
+                  ).join('');
+                })()}
               </select>
             </div>
             <div>
@@ -2499,7 +2532,6 @@
       if (tpl.paperFormat === 'a4') {
         pageSizeCss = isLandscape ? 'A4 landscape' : 'A4 portrait';
       } else if (useA4Sheet) {
-        // Full A4 sheet avoids Chromium auto-centering a smaller @page box in the middle of the paper
         pageSizeCss = 'A4 portrait';
         printLandscape = false;
       }
@@ -2548,13 +2580,10 @@
         if (n) countsByName.set(n, (countsByName.get(n) || 0) + 1);
       });
 
-      const q = clientsSearch.trim().toLowerCase();
-      const filtered = (db.clients || []).filter(c => {
-        if (!q) return true;
-        return String(c.name || '').toLowerCase().includes(q) ||
-          String(c.phone || '').toLowerCase().includes(q) ||
-          String(c.notes || '').toLowerCase().includes(q);
-      });
+      const q = clientsSearch.trim();
+      const filtered = (db.clients || []).filter(c => !q || searchTextMatches(q, [
+        c.name, c.phone, String(c.phone || '').replace(/\D/g, ''), c.notes
+      ]));
       const visible = filtered.slice(0, clientsPageLimit);
 
       ws.innerHTML = `
@@ -2570,7 +2599,7 @@
           </div>
 
           <div class="bg-white p-3.5 rounded-2xl border border-gray-100">
-            <input value="${escapeHtml(clientsSearch)}" oninput="clearTimeout(_searchDebounceTimer); const v=this.value; _searchDebounceTimer=setTimeout(()=>{ clientsSearch=v; clientsPageLimit=100; renderWorkspace(); }, 180);" placeholder="Пошук клієнта за ПІБ, телефоном або приміткою..." class="w-full rounded-xl border border-gray-200 px-3.5 py-2 text-xs focus:outline-none focus:border-[#1c6457]" />
+            <input id="clients-search-input" value="${escapeHtml(clientsSearch)}" oninput="handleClientsSearchInput(this)" placeholder="Фільтр у списку клієнтів: ПІБ, телефон або примітка..." class="w-full rounded-xl border border-gray-200 px-3.5 py-2 text-xs focus:outline-none focus:border-[#1c6457]" />
           </div>
 
           <div class="bg-white rounded-2xl border border-gray-100 overflow-x-auto">
@@ -2735,8 +2764,8 @@
     // 14. WAREHOUSE VIEW
     // =========================================================================
     function renderWarehouseView(ws) {
-      const q = partsSearch.trim().toLowerCase();
-      const filtered = (db.parts || []).filter(p => !q || String(p.name || '').toLowerCase().includes(q) || String(p.sku || '').toLowerCase().includes(q));
+      const q = partsSearch.trim();
+      const filtered = (db.parts || []).filter(p => !q || searchTextMatches(q, [p.name, p.sku, p.qty]));
       const visible = filtered.slice(0, partsPageLimit);
 
       ws.innerHTML = `
@@ -2752,7 +2781,7 @@
           </div>
 
           <div class="bg-white p-3.5 rounded-2xl border border-gray-100">
-            <input value="${escapeHtml(partsSearch)}" oninput="partsSearch=this.value; renderWorkspace();" placeholder="Пошук запчастини за назвою або артикулом..." class="w-full rounded-xl border border-gray-200 px-3.5 py-2 text-xs" />
+            <input id="parts-search-input" value="${escapeHtml(partsSearch)}" oninput="handlePartsSearchInput(this)" placeholder="Фільтр у списку складу: назва або артикул..." class="w-full rounded-xl border border-gray-200 px-3.5 py-2 text-xs" />
           </div>
 
           <div class="bg-white rounded-2xl border border-gray-100 overflow-x-auto">
@@ -2769,7 +2798,7 @@
               </thead>
               <tbody class="divide-y divide-gray-100">
                 ${visible.length === 0 ? `<tr><td colspan="6" class="py-8 text-center text-gray-400">Склад порожній</td></tr>` : visible.map(p => `
-                  <tr>
+                  <tr id="part-row-${escapeHtml(p.id)}">
                     <td class="py-3 px-4 font-semibold text-gray-900">${escapeHtml(p.name)}</td>
                     <td class="py-3 px-4 text-gray-500 font-mono">${escapeHtml(p.sku || '—')}</td>
                     <td class="py-3 px-4 font-bold ${Number(p.qty) > 0 ? 'text-emerald-700' : 'text-red-600'}">${Number(p.qty) || 0} шт.</td>
@@ -2784,6 +2813,13 @@
                 `).join('')}
               </tbody>
             </table>
+            ${filtered.length > partsPageLimit ? `
+              <div class="p-3 border-t border-gray-100 text-center">
+                <button onclick="partsPageLimit += 100; renderWorkspace();" class="px-4 py-2 rounded-xl bg-gray-100 hover:bg-gray-200 text-xs font-semibold text-gray-700">
+                  Показати ще (показано ${visible.length} із ${filtered.length})
+                </button>
+              </div>
+            ` : ''}
           </div>
         </div>
       `;
@@ -2932,8 +2968,11 @@
               </thead>
               <tbody class="divide-y divide-gray-100">
                 ${rows.map(r => `
-                  <tr>
-                    <td class="py-3 px-4 font-bold text-gray-900">${escapeHtml(r.emp.name)}</td>
+                  <tr class="${!isEmployeeActive(r.emp) ? 'opacity-60 bg-gray-50/50' : ''}">
+                    <td class="py-3 px-4 font-bold text-gray-900">
+                      ${escapeHtml(r.emp.name)}
+                      ${!isEmployeeActive(r.emp) ? `<span class="ml-1.5 px-1.5 py-0.5 rounded bg-gray-200 text-gray-600 text-[10px] font-semibold">Вимкнений</span>` : ''}
+                    </td>
                     <td class="py-3 px-4 text-gray-500">${r.emp.role === 'director' ? 'Директор' : 'Майстер'}</td>
                     <td class="py-3 px-4 font-semibold">${r.count}</td>
                     <td class="py-3 px-4">${formatMoney(r.worksSum)}</td>
@@ -3026,22 +3065,33 @@
                   <tr class="border-b border-gray-100 text-[11px] uppercase text-gray-500">
                     <th class="py-2.5 px-3">ПІБ</th>
                     <th class="py-2.5 px-3">Роль</th>
+                    <th class="py-2.5 px-3">Статус</th>
                     <th class="py-2.5 px-3">Умови ЗП</th>
                     <th class="py-2.5 px-3 text-right">Дії</th>
                   </tr>
                 </thead>
                 <tbody class="divide-y divide-gray-100">
-                  ${(db.employees || []).map(emp => `
-                    <tr>
-                      <td class="py-2.5 px-3 font-semibold">${escapeHtml(emp.name)}</td>
+                  ${(db.employees || []).map(emp => {
+                    const active = isEmployeeActive(emp);
+                    const isSelf = String(emp.id) === String(db.currentUserId);
+                    return `
+                    <tr class="${!active ? 'bg-gray-50/70 text-gray-400' : ''}">
+                      <td class="py-2.5 px-3 font-semibold ${active ? 'text-gray-900' : 'text-gray-500'}">${escapeHtml(emp.name)}</td>
                       <td class="py-2.5 px-3">${emp.role === 'director' ? 'Директор' : 'Майстер'}</td>
-                      <td class="py-2.5 px-3 text-gray-600">${emp.salaryValue || 0} (${escapeHtml(emp.salaryType || 'percent_works')})</td>
+                      <td class="py-2.5 px-3">
+                        ${active
+                          ? `<span class="px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200 text-[11px] font-semibold">Активний</span>`
+                          : `<span class="px-2 py-0.5 rounded-md bg-gray-100 text-gray-600 border border-gray-200 text-[11px] font-semibold">Вимкнений (історія збережена)</span>`}
+                      </td>
+                      <td class="py-2.5 px-3">${emp.salaryValue || 0} (${escapeHtml(emp.salaryType || 'percent_works')})</td>
                       <td class="py-2.5 px-3 text-right space-x-2">
                         <button onclick="openEmployeeModal('${escapeHtml(emp.id)}')" class="text-teal-700 font-semibold hover:underline">Редагувати</button>
-                        ${emp.id !== db.currentUserId ? `<button onclick="deleteEmployee('${escapeHtml(emp.id)}')" class="text-red-600 font-semibold hover:underline">Видалити</button>` : ''}
+                        ${!isSelf ? `<button onclick="toggleEmployeeActive('${escapeHtml(emp.id)}')" class="${active ? 'text-amber-700' : 'text-emerald-700'} font-semibold hover:underline">${active ? 'Вимкнути' : 'Увімкнути'}</button>` : ''}
+                        ${!isSelf ? `<button onclick="deleteEmployee('${escapeHtml(emp.id)}')" class="text-red-600 font-semibold hover:underline">Видалити</button>` : ''}
                       </td>
                     </tr>
-                  `).join('')}
+                  `;
+                  }).join('')}
                 </tbody>
               </table>
             </div>
@@ -3164,6 +3214,7 @@
           id: 'emp_' + Date.now(),
           name,
           role,
+          active: true,
           salaryType,
           salaryValue
         });
@@ -3172,6 +3223,28 @@
       closeModal();
       renderWorkspace();
       showToast('Співробітника збережено');
+    }
+
+    function toggleEmployeeActive(empId) {
+      if (!requireDirectorAccess()) return;
+      const emp = (db.employees || []).find(e => String(e.id) === String(empId));
+      if (!emp) return;
+      if (String(emp.id) === String(db.currentUserId)) {
+        showToast('Не можна вимкнути поточний активний профіль!', 'error');
+        return;
+      }
+      const nextState = !isEmployeeActive(emp);
+      if (!nextState && emp.role === 'director') {
+        const activeDirs = getActiveEmployees().filter(e => e.role === 'director');
+        if (activeDirs.length <= 1) {
+          showToast('Має залишатися хоча б один активний Директор!', 'error');
+          return;
+        }
+      }
+      emp.active = nextState;
+      saveDB();
+      renderWorkspace();
+      showToast(nextState ? `Співробітника «${emp.name}» знову активовано` : `Співробітника «${emp.name}» вимкнено (історія збережена)`);
     }
 
     function deleteEmployee(empId) {
@@ -3330,17 +3403,18 @@
     }
 
     // =========================================================================
-    // 18. SWITCH USER MODAL (DIRECTOR MASTER PASSWORD + BACKUP RESET)
+    // 18. SWITCH USER MODAL (DIRECTOR MASTER PASSWORD + BACKUP RESET + PROMOTE)
     // =========================================================================
     function openSwitchUserModal() {
-      const emps = db.employees || [];
+      const emps = getActiveEmployees();
+      const hasStoredPass = Boolean(db.directorPasswordHash || db.masterPasswordHash || db.adminPasswordHash);
       openModal(`
-        <div class="p-6 space-y-4">
+        <div class="p-6 space-y-4 max-h-[90vh] overflow-y-auto">
           <div class="flex items-center justify-between border-b border-gray-100 pb-3">
             <h3 class="text-base font-bold text-gray-900">Змінити профіль користувача</h3>
             <button onclick="closeModal()" class="text-gray-400 hover:text-gray-600 font-bold">✕</button>
           </div>
-          <div class="space-y-2 max-h-64 overflow-y-auto">
+          <div class="space-y-2 max-h-60 overflow-y-auto">
             ${emps.map(emp => {
               const active = emp.id === db.currentUserId;
               const isDir = emp.role === 'director';
@@ -3379,8 +3453,93 @@
               </label>
             </div>
           </div>
+
+          <!-- ADD OR PROMOTE DIRECTOR / ADMIN USER -->
+          <div class="pt-3 border-t border-gray-100">
+            <button type="button" onclick="document.getElementById('add-director-box').classList.toggle('hidden')" class="w-full text-left text-xs font-semibold text-[#1c6457] hover:underline flex items-center justify-between">
+              <span>+ Додати або призначити Директора (Адміна)</span>
+              <span>▾</span>
+            </button>
+            <div id="add-director-box" class="hidden mt-2.5 p-3.5 rounded-xl bg-gray-50 border border-gray-200 space-y-2.5 text-xs">
+              <div>
+                <label class="block font-semibold text-gray-700 mb-1">Кого зробити Директором:</label>
+                <select id="dir-promote-target" onchange="document.getElementById('dir-new-name-wrap').classList.toggle('hidden', this.value !== '__new__')" class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2">
+                  ${(db.employees || []).map(e => `<option value="${escapeHtml(e.id)}">Підвищити: ${escapeHtml(e.name)} (${e.role === 'director' ? 'вже Директор' : 'Майстер'}${!isEmployeeActive(e) ? ', вимкнений' : ''})</option>`).join('')}
+                  <option value="__new__" ${(db.employees || []).length === 0 ? 'selected' : ''}>+ Створити нового Директора (Адміна)</option>
+                </select>
+              </div>
+              <div id="dir-new-name-wrap" class="${(db.employees || []).length === 0 ? '' : 'hidden'}">
+                <label class="block font-semibold text-gray-700 mb-1">ПІБ нового Директора *</label>
+                <input id="dir-new-name" placeholder="Наприклад: Олександр Коваленко" class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2" />
+              </div>
+              <div>
+                <label class="block font-semibold text-gray-700 mb-1">${hasStoredPass ? 'Введіть діючий майстер-пароль Директора *' : 'Задайте майстер-пароль Директора (мін. 4 символи) *'}</label>
+                <input id="dir-promote-pass" type="password" minlength="4" placeholder="${hasStoredPass ? 'Майстер-пароль' : 'Придумайте пароль (мін. 4 символи)'}" class="w-full rounded-lg border border-gray-200 bg-white px-3 py-2" />
+              </div>
+              <button type="button" onclick="submitPromoteOrAddDirector()" class="w-full py-2 rounded-lg bg-[#143430] hover:bg-[#1c6457] text-white font-semibold">
+                Підтвердити та надати права Директора
+              </button>
+            </div>
+          </div>
         </div>
       `, 'max-w-md');
+    }
+
+    async function submitPromoteOrAddDirector() {
+      const targetVal = document.getElementById('dir-promote-target')?.value || '__new__';
+      const newName = (document.getElementById('dir-new-name')?.value || '').trim();
+      const pass = document.getElementById('dir-promote-pass')?.value || '';
+      const hasStoredPass = Boolean(db.directorPasswordHash || db.masterPasswordHash || db.adminPasswordHash);
+
+      if (targetVal === '__new__' && !newName) {
+        showToast('Вкажіть ПІБ нового Директора!', 'error');
+        return;
+      }
+
+      if (hasStoredPass) {
+        if (!verifyDirectorPassword(pass)) {
+          showToast('Невірний майстер-пароль Директора!', 'error');
+          return;
+        }
+      } else {
+        if (pass.trim().length < 4) {
+          showToast('Задайте майстер-пароль (мінімум 4 символи)!', 'error');
+          return;
+        }
+        db.directorPasswordHash = hashPassword(pass.trim());
+      }
+
+      let activeEmp = null;
+      if (targetVal === '__new__') {
+        activeEmp = {
+          id: 'emp_dir_' + Date.now(),
+          name: newName,
+          role: 'director',
+          active: true,
+          salaryType: 'percent_works',
+          salaryValue: 50,
+          phone: ''
+        };
+        if (!Array.isArray(db.employees)) db.employees = [];
+        db.employees.push(activeEmp);
+      } else {
+        activeEmp = (db.employees || []).find(e => String(e.id) === String(targetVal));
+        if (activeEmp) {
+          activeEmp.role = 'director';
+          activeEmp.active = true;
+        }
+      }
+
+      if (!activeEmp) return;
+      db.currentUserId = activeEmp.id;
+      saveDB(true);
+      if (FirebaseSync.connected) {
+        await FirebaseSync.pushFullDB(true);
+      }
+      closeModal();
+      refreshShellUI();
+      renderWorkspace();
+      showToast(`Профіль «${activeEmp.name}» активовано з правами Директора!`);
     }
 
     let pendingDirectorId = '';
@@ -3693,293 +3852,291 @@
         'chcp 65001 >nul',
         'cd /d "%~dp0"',
         'echo =========================================================',
-        'echo   Збірка Windows програми ServiceCenter CRM (.exe)',
+        'echo   ServiceCenter CRM - Avtomatychna zbirka Windows (.exe)',
         'echo =========================================================',
-        'if not exist "index.html" if exist "index.html.html" ren "index.html.html" "index.html"',
-        'if not exist "index.html" if exist "index.html.txt" ren "index.html.txt" "index.html"',
         'if not exist "index.html" (',
-        '  echo [ПОМИЛКА] Покладіть файл index.html поруч із цим скриптом!',
+        '  echo [POMYLKA] Pokladit fayl index.html poruch z cym .bat faylom!',
         '  pause',
         '  exit /b 1',
         ')',
         'where node >nul 2>nul',
-        'if errorlevel 1 (',
-        '  echo [ПОМИЛКА] Node.js не встановлено! Завантажте LTS версію з https://nodejs.org/',
+        'if %errorlevel% neq 0 (',
+        '  echo [POMYLKA] Node.js ne vstanovleno. Zavantazhte LTS z https://nodejs.org',
         '  pause',
         '  exit /b 1',
         ')',
-        'echo [1/3] Генерація файлів Electron...',
-        `powershell -NoProfile -Command "[IO.File]::WriteAllBytes('package.json',[Convert]::FromBase64String('${utf8ToBase64(pkgJsonStr)}'))"`,
-        `powershell -NoProfile -Command "[IO.File]::WriteAllBytes('main.js',[Convert]::FromBase64String('${utf8ToBase64(mainJsStr)}'))"`,
-        `powershell -NoProfile -Command "[IO.File]::WriteAllBytes('preload.js',[Convert]::FromBase64String('${utf8ToBase64(preloadJsStr)}'))"`,
-        'echo [2/3] Встановлення залежностей Electron (1-2 хв)...',
+        'powershell -NoProfile -Command "[IO.File]::WriteAllBytes(\'package.json\', [Convert]::FromBase64String(\'' + utf8ToBase64(pkgJsonStr) + '\'))"',
+        'powershell -NoProfile -Command "[IO.File]::WriteAllBytes(\'main.js\', [Convert]::FromBase64String(\'' + utf8ToBase64(mainJsStr) + '\'))"',
+        'powershell -NoProfile -Command "[IO.File]::WriteAllBytes(\'preload.js\', [Convert]::FromBase64String(\'' + utf8ToBase64(preloadJsStr) + '\'))"',
+        'echo [1/2] Vstanovlennya Electron ta electron-builder...',
         'call npm install',
-        'if errorlevel 1 (',
-        '  echo [ПОМИЛКА] Не вдалося встановити пакети npm.',
-        '  pause',
-        '  exit /b 1',
-        ')',
-        'echo [3/3] Збірка портативного .exe файлу...',
+        'echo [2/2] Zbirka portable .exe faylu...',
         'call npm run build',
-        'if errorlevel 1 (',
-        '  echo [ПОМИЛКА] Помилка під час пакування .exe.',
-        '  pause',
-        '  exit /b 1',
-        ')',
         'echo =========================================================',
-        'echo   ГОТОВО! Ваш .exe файл знаходиться у папці dist',
+        'echo   GOTOVO! Fayl ServiceCenter CRM.exe u papci dist\\',
         'echo =========================================================',
-        'if exist "dist" start "" "dist"',
         'pause'
       ];
 
-      const blob = new Blob([batLines.join('\r\n')], { type: 'application/bat' });
+      const blob = new Blob([batLines.join('\r\n')], { type: 'application/bat;charset=utf-8' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = 'BUILD_WINDOWS_EXE.bat';
       a.click();
-      showToast('Скрипт BUILD_WINDOWS_EXE.bat завантажено!');
+      showToast('Файл BUILD_WINDOWS_EXE.bat завантажено!');
     }
 
-    function syncPaperSettingsAcrossTemplates(sourceType) {
+    function openReceiptEditorModal(initialTab = 'intake') {
+      if (!requireDirectorAccess()) return;
       ensureReceiptTemplates();
-      const targetType = sourceType === 'intake' ? 'issue' : 'intake';
-      const src = db.receiptTemplates[sourceType];
-      const dst = db.receiptTemplates[targetType];
-      dst.printerName = src.printerName;
-      dst.paperFormat = src.paperFormat;
-      dst.orientation = src.orientation;
-      dst.fitToA4Top = src.fitToA4Top;
-      dst.offsetTopMm = src.offsetTopMm;
-      dst.customWidthMm = src.customWidthMm;
-      dst.customHeightMm = src.customHeightMm;
-      dst.marginMm = src.marginMm;
-      dst.fontSizePt = src.fontSizePt;
-      dst.copiesPerPage = src.copiesPerPage;
-      saveDB();
-      showToast(`Параметри паперу та принтера скопійовано у «${targetType === 'intake' ? 'Квитанцію прийому' : 'Квитанцію видачі'}»!`);
-    }
-
-    function openReceiptEditorModal(type) {
-      ensureReceiptTemplates();
-      const tpl = db.receiptTemplates[type];
-      const isIntake = type === 'intake';
+      const tab = initialTab === 'issue' ? 'issue' : 'intake';
+      const tpl = db.receiptTemplates[tab];
       const dims = getPaperDimensions(tpl);
+
       openModal(`
-        <div class="p-6 space-y-4 max-h-[90vh] overflow-y-auto text-xs">
+        <div class="p-6 space-y-4 max-h-[92vh] overflow-y-auto text-xs">
           <div class="flex items-center justify-between border-b border-gray-100 pb-3">
-            <h3 class="text-base font-bold">Редактор шаблону: ${isIntake ? 'Квитанція прийому' : 'Квитанція видачі'}</h3>
-            <button onclick="closeModal()" class="text-gray-400 font-bold">✕</button>
+            <h3 class="text-base font-bold text-gray-900">Конструктор шаблону квитанцій</h3>
+            <button onclick="closeModal()" class="text-gray-400 hover:text-gray-600 font-bold">✕</button>
           </div>
 
-          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <div>
-              <label class="block font-semibold mb-1">Принтер для цієї квитанції</label>
-              <select onchange="db.receiptTemplates['${type}'].printerName=this.value; saveDB();" class="w-full rounded-xl border border-gray-200 px-3 py-1.5 bg-white">
-                <option value="">Загальний принтер з налаштувань</option>
-                ${renderPrinterOptions(tpl.printerName || '')}
-              </select>
-            </div>
-            <div>
-              <label class="block font-semibold mb-1">Формат паперу (${dims.widthMm}×${dims.heightMm} мм)</label>
-              <select onchange="db.receiptTemplates['${type}'].paperFormat=this.value; saveDB(); openReceiptEditorModal('${type}');" class="w-full rounded-xl border border-gray-200 px-3 py-1.5 bg-white">
-                ${Object.keys(PAPER_PRESETS).map(k => `<option value="${k}" ${tpl.paperFormat === k ? 'selected' : ''}>${escapeHtml(PAPER_PRESETS[k].label)}</option>`).join('')}
-              </select>
-            </div>
-            <div>
-              <label class="block font-semibold mb-1">Орієнтація сторінки</label>
-              <select onchange="db.receiptTemplates['${type}'].orientation=this.value; saveDB(); openReceiptEditorModal('${type}');" class="w-full rounded-xl border border-gray-200 px-3 py-1.5 bg-white">
-                <option value="portrait" ${(tpl.orientation || 'portrait') === 'portrait' ? 'selected' : ''}>Книжкова (Portrait)</option>
-                <option value="landscape" ${tpl.orientation === 'landscape' ? 'selected' : ''}>Альбомна (Landscape)</option>
-              </select>
-            </div>
+          <div class="flex gap-2">
+            <button type="button" onclick="openReceiptEditorModal('intake')" class="px-4 py-2 rounded-xl font-semibold ${tab === 'intake' ? 'bg-[#143430] text-white' : 'bg-gray-100 text-gray-700'}">Квитанція прийому</button>
+            <button type="button" onclick="openReceiptEditorModal('issue')" class="px-4 py-2 rounded-xl font-semibold ${tab === 'issue' ? 'bg-[#143430] text-white' : 'bg-gray-100 text-gray-700'}">Квитанція видачі / Гарантія</button>
           </div>
 
-          ${tpl.paperFormat === 'custom' ? `
-            <div class="grid grid-cols-2 gap-3">
+          <form onsubmit="saveReceiptTemplateForm(event, '${tab}')" class="space-y-3">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label class="block font-semibold mb-1">Формат паперу</label>
+                <select id="rt-paper" onchange="toggleCustomPaperFields()" class="w-full rounded-xl border border-gray-200 px-3 py-2 bg-white">
+                  ${Object.keys(PAPER_PRESETS).map(k => `<option value="${k}" ${tpl.paperFormat === k ? 'selected' : ''}>${PAPER_PRESETS[k].label}</option>`).join('')}
+                </select>
+              </div>
+              <div>
+                <label class="block font-semibold mb-1">Орієнтація</label>
+                <select id="rt-orient" class="w-full rounded-xl border border-gray-200 px-3 py-2 bg-white">
+                  <option value="portrait" ${tpl.orientation === 'portrait' ? 'selected' : ''}>Книжкова (Portrait)</option>
+                  <option value="landscape" ${tpl.orientation === 'landscape' ? 'selected' : ''}>Альбомна (Landscape)</option>
+                </select>
+              </div>
+              <div>
+                <label class="block font-semibold mb-1">Копій на аркуші</label>
+                <select id="rt-copies" class="w-full rounded-xl border border-gray-200 px-3 py-2 bg-white">
+                  <option value="1" ${Number(tpl.copiesPerPage) !== 2 ? 'selected' : ''}>1 квитанція на аркуші</option>
+                  <option value="2" ${Number(tpl.copiesPerPage) === 2 ? 'selected' : ''}>2 квитанції (СЦ + Клієнт)</option>
+                </select>
+              </div>
+            </div>
+
+            <!-- TOP-LEFT A4 ANCHORING FOR A5/A6 -->
+            <div class="p-3 rounded-xl bg-teal-50/70 border border-teal-200 space-y-2">
+              <label class="inline-flex items-center gap-2 font-semibold text-teal-950 cursor-pointer">
+                <input id="rt-fit-a4-top" type="checkbox" ${tpl.fitToA4Top !== false ? 'checked' : ''} class="rounded text-[#1c6457]" />
+                <span>Друкувати зверху зліва на аркуші A4 (для форматів A5 / A6, без зміщення в центр)</span>
+              </label>
+              <div class="flex items-center gap-3">
+                <label class="text-[11px] text-teal-900 font-semibold">Відступ зверху аркуша (мм):</label>
+                <input id="rt-offset-top" type="number" min="0" max="200" value="${Number(tpl.offsetTopMm) || 0}" class="w-24 rounded-lg border border-teal-300 bg-white px-2.5 py-1" />
+                <span class="text-[11px] text-teal-800">(0 мм = самий верх аркуша A4)</span>
+              </div>
+            </div>
+
+            <div id="rt-custom-dims" class="${tpl.paperFormat === 'custom' ? 'grid' : 'hidden'} grid-cols-2 gap-3">
               <div>
                 <label class="block font-semibold mb-1">Ширина (мм)</label>
-                <input type="number" min="40" max="400" value="${tpl.customWidthMm}" onchange="db.receiptTemplates['${type}'].customWidthMm=Number(this.value); saveDB(); openReceiptEditorModal('${type}');" class="w-full rounded-xl border border-gray-200 px-3 py-1.5" />
+                <input id="rt-w" type="number" min="40" max="400" value="${dims.widthMm}" class="w-full rounded-xl border border-gray-200 px-3 py-2" />
               </div>
               <div>
                 <label class="block font-semibold mb-1">Висота (мм)</label>
-                <input type="number" min="40" max="500" value="${tpl.customHeightMm}" onchange="db.receiptTemplates['${type}'].customHeightMm=Number(this.value); saveDB(); openReceiptEditorModal('${type}');" class="w-full rounded-xl border border-gray-200 px-3 py-1.5" />
+                <input id="rt-h" type="number" min="40" max="600" value="${dims.heightMm}" class="w-full rounded-xl border border-gray-200 px-3 py-2" />
               </div>
             </div>
-          ` : ''}
 
-          ${(tpl.paperFormat === 'a5' || tpl.paperFormat === 'a6') ? `
-            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 px-3 py-2 rounded-xl bg-teal-50/70 border border-teal-200 text-teal-900">
-              <label class="inline-flex items-center gap-2 cursor-pointer">
-                <input type="checkbox" ${tpl.fitToA4Top !== false ? 'checked' : ''} onchange="db.receiptTemplates['${type}'].fitToA4Top=this.checked; saveDB();" />
-                <span>У принтері лежить звичайний аркуш A4 (притискати квитанцію до верхнього лівого кута без центрування)</span>
-              </label>
-              <button type="button" onclick="syncPaperSettingsAcrossTemplates('${type}')" class="px-2.5 py-1 rounded-lg bg-[#1c6457] hover:bg-[#154e44] text-white font-semibold shrink-0">
-                ⇄ Застосувати формат до обох квитанцій
-              </button>
-            </div>
-          ` : `
-            <div class="flex justify-end">
-              <button type="button" onclick="syncPaperSettingsAcrossTemplates('${type}')" class="px-3 py-1.5 rounded-lg bg-teal-50 border border-teal-200 text-teal-900 font-semibold">
-                ⇄ Застосувати формат паперу та принтер до обох квитанцій
-              </button>
-            </div>
-          `}
-
-          <div class="grid grid-cols-1 sm:grid-cols-4 gap-3">
-            <div>
-              <label class="block font-semibold mb-1">Поля квитанції (мм)</label>
-              <input type="number" min="0" max="40" value="${tpl.marginMm}" onchange="db.receiptTemplates['${type}'].marginMm=Number(this.value); saveDB();" class="w-full rounded-xl border border-gray-200 px-3 py-1.5" />
-            </div>
-            <div>
-              <label class="block font-semibold mb-1">Зсув зверху (мм)</label>
-              <input type="number" min="-30" max="150" value="${Number(tpl.offsetTopMm) || 0}" onchange="db.receiptTemplates['${type}'].offsetTopMm=Number(this.value); saveDB();" class="w-full rounded-xl border border-gray-200 px-3 py-1.5" />
-            </div>
-            <div>
-              <label class="block font-semibold mb-1">Розмір шрифту (pt)</label>
-              <input type="number" min="7" max="16" value="${tpl.fontSizePt}" onchange="db.receiptTemplates['${type}'].fontSizePt=Number(this.value); saveDB();" class="w-full rounded-xl border border-gray-200 px-3 py-1.5" />
-            </div>
-            <div>
-              <label class="block font-semibold mb-1">Копій на аркуші</label>
-              <select onchange="db.receiptTemplates['${type}'].copiesPerPage=Number(this.value); saveDB();" class="w-full rounded-xl border border-gray-200 px-3 py-1.5 bg-white">
-                <option value="1" ${Number(tpl.copiesPerPage) === 1 ? 'selected' : ''}>1 копія</option>
-                <option value="2" ${Number(tpl.copiesPerPage) === 2 ? 'selected' : ''}>2 копії з лінією відрізу</option>
-              </select>
-            </div>
-          </div>
-
-          <div>
-            <label class="block font-semibold mb-1">Заголовок документа</label>
-            <input value="${escapeHtml(tpl.docTitle)}" onchange="db.receiptTemplates['${type}'].docTitle=this.value; saveDB();" class="w-full rounded-xl border border-gray-200 px-3 py-1.5" />
-          </div>
-
-          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label class="block font-semibold mb-1">Верхній колонтитул</label>
-              <input value="${escapeHtml(tpl.headerText || '')}" onchange="db.receiptTemplates['${type}'].headerText=this.value; saveDB();" class="w-full rounded-xl border border-gray-200 px-3 py-1.5" />
-            </div>
-            <div>
-              <label class="block font-semibold mb-1">Нижній колонтитул</label>
-              <input value="${escapeHtml(tpl.footerText || '')}" onchange="db.receiptTemplates['${type}'].footerText=this.value; saveDB();" class="w-full rounded-xl border border-gray-200 px-3 py-1.5" />
-            </div>
-          </div>
-
-          <div class="flex flex-wrap gap-4 py-1">
-            <label class="inline-flex items-center gap-1.5"><input type="checkbox" ${tpl.showBranch ? 'checked' : ''} onchange="db.receiptTemplates['${type}'].showBranch=this.checked; saveDB();" /> Точка прийому</label>
-            <label class="inline-flex items-center gap-1.5"><input type="checkbox" ${tpl.showCompanyPhone ? 'checked' : ''} onchange="db.receiptTemplates['${type}'].showCompanyPhone=this.checked; saveDB();" /> Телефон СЦ</label>
-            <label class="inline-flex items-center gap-1.5"><input type="checkbox" ${tpl.showCompanyAddress ? 'checked' : ''} onchange="db.receiptTemplates['${type}'].showCompanyAddress=this.checked; saveDB();" /> Адреса СЦ</label>
-            <label class="inline-flex items-center gap-1.5"><input type="checkbox" ${tpl.showSerial ? 'checked' : ''} onchange="db.receiptTemplates['${type}'].showSerial=this.checked; saveDB();" /> Серійний номер</label>
-            <label class="inline-flex items-center gap-1.5"><input type="checkbox" ${tpl.showCompleteness !== false ? 'checked' : ''} onchange="db.receiptTemplates['${type}'].showCompleteness=this.checked; saveDB();" /> Комплектація</label>
-            <label class="inline-flex items-center gap-1.5"><input type="checkbox" ${tpl.showMaster ? 'checked' : ''} onchange="db.receiptTemplates['${type}'].showMaster=this.checked; saveDB();" /> Майстер / приймальник</label>
-          </div>
-
-          <!-- CUSTOM IMAGES (LOGO / STAMP / QR) -->
-          <div class="p-3 rounded-xl bg-gray-50 border border-gray-200 space-y-2">
-            <div class="flex items-center justify-between">
-              <span class="font-bold text-gray-800">Зображення на квитанції (Логотип, Печатка, QR)</span>
-              <label class="px-3 py-1 rounded-lg bg-[#1c6457] text-white font-semibold cursor-pointer">
-                + Додати картинку
-                <input type="file" accept="image/*" onchange="addReceiptTemplateImage(event, '${type}')" class="hidden" />
-              </label>
-            </div>
-            ${(tpl.images || []).map((img, idx) => `
-              <div class="flex flex-wrap items-center gap-2 bg-white p-2 rounded-lg border border-gray-200">
-                <img src="${img.dataUrl}" class="w-8 h-8 object-contain border rounded" />
-                <label>X%: <input type="number" min="0" max="95" value="${img.xPct}" onchange="db.receiptTemplates['${type}'].images[${idx}].xPct=Number(this.value); saveDB();" class="w-14 border rounded px-1 py-0.5" /></label>
-                <label>Y%: <input type="number" min="0" max="95" value="${img.yPct}" onchange="db.receiptTemplates['${type}'].images[${idx}].yPct=Number(this.value); saveDB();" class="w-14 border rounded px-1 py-0.5" /></label>
-                <label>Шир.(мм): <input type="number" min="5" max="180" value="${img.widthMm}" onchange="db.receiptTemplates['${type}'].images[${idx}].widthMm=Number(this.value); saveDB();" class="w-14 border rounded px-1 py-0.5" /></label>
-                <button type="button" onclick="db.receiptTemplates['${type}'].images.splice(${idx},1); saveDB(); openReceiptEditorModal('${type}');" class="ml-auto text-red-600 font-bold">✕</button>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label class="block font-semibold mb-1">Внутрішні поля (мм)</label>
+                <input id="rt-margin" type="number" min="0" max="30" value="${Number(tpl.marginMm) || 8}" class="w-full rounded-xl border border-gray-200 px-3 py-2" />
               </div>
-            `).join('')}
-          </div>
+              <div>
+                <label class="block font-semibold mb-1">Розмір шрифту (pt)</label>
+                <input id="rt-font" type="number" min="6" max="18" value="${Number(tpl.fontSizePt) || 10}" class="w-full rounded-xl border border-gray-200 px-3 py-2" />
+              </div>
+              <div>
+                <label class="block font-semibold mb-1">Принтер для цього шаблону</label>
+                <select id="rt-printer" class="w-full rounded-xl border border-gray-200 px-3 py-2 bg-white">
+                  <option value="">За замовчуванням</option>
+                  ${renderPrinterOptions(tpl.printerName || '')}
+                </select>
+              </div>
+            </div>
 
-          <div>
-            <label class="block font-semibold mb-1">${isIntake ? 'Текст умов прийому' : 'Текст гарантійного талону'}</label>
-            <textarea rows="3" onchange="db.receiptTemplates['${type}']['${isIntake ? 'termsText' : 'warrantyText'}']=this.value; saveDB();" class="w-full rounded-xl border border-gray-200 px-3 py-2">${escapeHtml(isIntake ? tpl.termsText : tpl.warrantyText)}</textarea>
-          </div>
+            <div>
+              <label class="block font-semibold mb-1">Шапка документа</label>
+              <input id="rt-header" value="${escapeHtml(tpl.headerText || '')}" class="w-full rounded-xl border border-gray-200 px-3 py-2" />
+            </div>
 
-          <div class="flex justify-end pt-2">
-            <button onclick="closeModal(); showToast('Шаблон квитанції збережено');" class="px-5 py-2 rounded-xl bg-[#1c6457] text-white font-semibold">Готово</button>
-          </div>
+            <div>
+              <label class="block font-semibold mb-1">Заголовок документа</label>
+              <input id="rt-title" value="${escapeHtml(tpl.docTitle || '')}" class="w-full rounded-xl border border-gray-200 px-3 py-2" />
+            </div>
+
+            <div>
+              <label class="block font-semibold mb-1">${tab === 'intake' ? 'Умови прийому та зберігання' : 'Умови гарантії'}</label>
+              <textarea id="rt-terms" rows="3" class="w-full rounded-xl border border-gray-200 px-3 py-2">${escapeHtml(tab === 'intake' ? (tpl.termsText || '') : (tpl.warrantyText || ''))}</textarea>
+              <div class="text-[11px] text-gray-400 mt-0.5">Змінні: {order_id}, {company_name}, {branch}, {client_name}, {client_phone}, {device}, {serial}, {total}, {warranty_days}, {warranty_until}, {date}</div>
+            </div>
+
+            <div>
+              <label class="block font-semibold mb-1">Нижній колонтитул (підвал)</label>
+              <input id="rt-footer" value="${escapeHtml(tpl.footerText || '')}" class="w-full rounded-xl border border-gray-200 px-3 py-2" />
+            </div>
+
+            <div class="flex flex-wrap gap-4 pt-1">
+              <label class="inline-flex items-center gap-1.5"><input id="rt-s-branch" type="checkbox" ${tpl.showBranch ? 'checked' : ''} /> Філія</label>
+              <label class="inline-flex items-center gap-1.5"><input id="rt-s-phone" type="checkbox" ${tpl.showCompanyPhone ? 'checked' : ''} /> Телефон СЦ</label>
+              <label class="inline-flex items-center gap-1.5"><input id="rt-s-addr" type="checkbox" ${tpl.showCompanyAddress ? 'checked' : ''} /> Адреса СЦ</label>
+              <label class="inline-flex items-center gap-1.5"><input id="rt-s-serial" type="checkbox" ${tpl.showSerial ? 'checked' : ''} /> Серійний №</label>
+              <label class="inline-flex items-center gap-1.5"><input id="rt-s-comp" type="checkbox" ${tpl.showCompleteness !== false ? 'checked' : ''} /> Комплектація</label>
+              <label class="inline-flex items-center gap-1.5"><input id="rt-s-master" type="checkbox" ${tpl.showMaster ? 'checked' : ''} /> Майстер</label>
+            </div>
+
+            <!-- LOGO / STAMP IMAGE UPLOAD -->
+            <div class="p-3 rounded-xl bg-gray-50 border border-gray-200 space-y-2">
+              <div class="flex items-center justify-between">
+                <span class="font-semibold">Логотип або печатка на квитанції (${(tpl.images || []).length})</span>
+                <label class="px-3 py-1.5 rounded-lg bg-white border border-gray-200 hover:bg-gray-100 font-semibold cursor-pointer">
+                  + Додати зображення (PNG/JPG)
+                  <input type="file" accept="image/*" onchange="addReceiptImage(event, '${tab}')" class="hidden" />
+                </label>
+              </div>
+              ${(tpl.images || []).map((img, i) => `
+                <div class="flex flex-wrap items-center gap-2 bg-white p-2 rounded-lg border border-gray-200">
+                  <img src="${img.dataUrl}" class="w-8 h-8 object-contain border rounded" />
+                  <label>X(%): <input type="number" min="0" max="95" value="${img.xPct}" onchange="updateReceiptImageProp('${tab}', ${i}, 'xPct', this.value)" class="w-14 border rounded px-1 py-0.5" /></label>
+                  <label>Y(%): <input type="number" min="0" max="95" value="${img.yPct}" onchange="updateReceiptImageProp('${tab}', ${i}, 'yPct', this.value)" class="w-14 border rounded px-1 py-0.5" /></label>
+                  <label>Шир.(мм): <input type="number" min="5" max="150" value="${img.widthMm}" onchange="updateReceiptImageProp('${tab}', ${i}, 'widthMm', this.value)" class="w-16 border rounded px-1 py-0.5" /></label>
+                  <button type="button" onclick="removeReceiptImage('${tab}', ${i})" class="ml-auto text-red-600 font-bold">✕</button>
+                </div>
+              `).join('')}
+            </div>
+
+            <div class="flex justify-end gap-2 pt-3 border-t border-gray-100">
+              <button type="button" onclick="closeModal()" class="px-4 py-2 rounded-xl border border-gray-200">Закрити</button>
+              <button type="submit" class="px-5 py-2 rounded-xl bg-[#1c6457] text-white font-semibold">Зберегти шаблон</button>
+            </div>
+          </form>
         </div>
-      `, 'max-w-2xl');
+      `, 'max-w-3xl');
     }
 
-    function addReceiptTemplateImage(e, type) {
+    function toggleCustomPaperFields() {
+      const sel = document.getElementById('rt-paper');
+      const box = document.getElementById('rt-custom-dims');
+      if (!sel || !box) return;
+      if (sel.value === 'custom') {
+        box.classList.remove('hidden');
+        box.classList.add('grid');
+      } else {
+        box.classList.add('hidden');
+        box.classList.remove('grid');
+      }
+    }
+
+    function saveReceiptTemplateForm(e, tab) {
+      e.preventDefault();
+      ensureReceiptTemplates();
+      const tpl = db.receiptTemplates[tab];
+      tpl.paperFormat = document.getElementById('rt-paper').value;
+      tpl.orientation = document.getElementById('rt-orient').value;
+      tpl.fitToA4Top = document.getElementById('rt-fit-a4-top').checked;
+      tpl.offsetTopMm = Math.max(0, Number(document.getElementById('rt-offset-top').value) || 0);
+      tpl.copiesPerPage = Number(document.getElementById('rt-copies').value) || 1;
+      tpl.customWidthMm = Number(document.getElementById('rt-w').value) || 148;
+      tpl.customHeightMm = Number(document.getElementById('rt-h').value) || 210;
+      tpl.marginMm = Number(document.getElementById('rt-margin').value) || 8;
+      tpl.fontSizePt = Number(document.getElementById('rt-font').value) || 10;
+      tpl.printerName = document.getElementById('rt-printer').value;
+      tpl.headerText = document.getElementById('rt-header').value;
+      tpl.docTitle = document.getElementById('rt-title').value;
+      tpl.footerText = document.getElementById('rt-footer').value;
+      if (tab === 'intake') tpl.termsText = document.getElementById('rt-terms').value;
+      else tpl.warrantyText = document.getElementById('rt-terms').value;
+      tpl.showBranch = document.getElementById('rt-s-branch').checked;
+      tpl.showCompanyPhone = document.getElementById('rt-s-phone').checked;
+      tpl.showCompanyAddress = document.getElementById('rt-s-addr').checked;
+      tpl.showSerial = document.getElementById('rt-s-serial').checked;
+      tpl.showCompleteness = document.getElementById('rt-s-comp').checked;
+      tpl.showMaster = document.getElementById('rt-s-master').checked;
+      saveDB();
+      showToast('Шаблон квитанції збережено!');
+    }
+
+    function addReceiptImage(e, tab) {
       const file = e.target.files && e.target.files[0];
       if (!file) return;
       const reader = new FileReader();
       reader.onload = () => {
         ensureReceiptTemplates();
-        db.receiptTemplates[type].images.push({
+        db.receiptTemplates[tab].images.push({
           dataUrl: reader.result,
-          xPct: 70,
-          yPct: 5,
-          widthMm: 28,
-          opacity: 1
+          xPct: 65,
+          yPct: 60,
+          widthMm: 30,
+          opacity: 0.9
         });
         saveDB();
-        openReceiptEditorModal(type);
+        openReceiptEditorModal(tab);
       };
       reader.readAsDataURL(file);
     }
 
+    function updateReceiptImageProp(tab, idx, prop, val) {
+      ensureReceiptTemplates();
+      const img = db.receiptTemplates[tab].images[idx];
+      if (!img) return;
+      img[prop] = Number(val) || 0;
+      saveDB();
+    }
+
+    function removeReceiptImage(tab, idx) {
+      ensureReceiptTemplates();
+      db.receiptTemplates[tab].images.splice(idx, 1);
+      saveDB();
+      openReceiptEditorModal(tab);
+    }
+
+    // =========================================================================
+    // 19. EXPORT / IMPORT / RESET DATABASE
+    // =========================================================================
     function exportDbJson() {
-      const blob = new Blob([JSON.stringify(db, null, 2)], { type: 'application/json' });
+      if (!requireDirectorAccess()) return;
+      const blob = new Blob([JSON.stringify(db, null, 2)], { type: 'application/json;charset=utf-8' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = `crm_backup_${getTodayPrefix()}.json`;
       a.click();
+      showToast('Резервну копію JSON завантажено!');
     }
 
     function importDbJson(e) {
+      if (!requireDirectorAccess()) return;
       const file = e.target.files && e.target.files[0];
       if (!file) return;
       const reader = new FileReader();
-      reader.onload = async () => {
+      reader.onload = () => {
         try {
-          let parsed = JSON.parse(reader.result);
-          if (!parsed || typeof parsed !== 'object') throw new Error('Невірний формат файлу');
-          if (!parsed.orders && !parsed.companyName) {
-            const wrapperKey = Object.keys(parsed).find(k => parsed[k] && typeof parsed[k] === 'object' && (parsed[k].orders || parsed[k].companyName || parsed[k].meta));
-            if (wrapperKey) {
-              const inner = parsed[wrapperKey];
-              parsed = inner.meta ? { ...inner.meta, ...inner } : inner;
-            }
-          }
-          if (parsed.meta && typeof parsed.meta === 'object') {
-            parsed = { ...parsed.meta, ...parsed };
-          }
-
-          const activeFbConfig = db.firebaseConfig;
+          const parsed = JSON.parse(reader.result);
+          if (!parsed || typeof parsed !== 'object') throw new Error('Невірний формат JSON');
           db = { ...createEmptyDB(), ...parsed, initialized: true };
-          if (!db.firebaseConfig && activeFbConfig) {
-            db.firebaseConfig = activeFbConfig;
-          }
-          ensureReceiptTemplates();
           normalizeAndMigrateDB();
-
-          let withSumCount = 0;
-          let grandSum = 0;
-          (db.orders || []).forEach(o => {
-            const t = getOrderTotal(o);
-            if (t > 0) {
-              withSumCount++;
-              grandSum += t;
-            }
-          });
-
-          StorageEngine.save(true);
-          if (FirebaseSync.connected) {
-            await FirebaseSync.pushFullDB(true);
-          }
+          ensureReceiptTemplates();
+          saveDB(true);
           refreshShellUI();
           renderWorkspace();
-          showToast(`Імпортовано ремонтів: ${(db.orders || []).length} (із сумою: ${withSumCount}, разом: ${formatMoney(grandSum)})`);
+          showToast('Базу успішно імпортовано! Усі дати та суми автоматично перевірено.');
         } catch (err) {
-          showToast('Помилка імпорту: ' + err.message, 'error');
-        } finally {
-          e.target.value = '';
+          showToast('Помилка імпорту JSON: ' + err.message, 'error');
         }
       };
       reader.readAsText(file);
@@ -3987,373 +4144,354 @@
 
     function resetFullDatabase() {
       if (!requireDirectorAccess()) return;
+      if (!confirm('УВАГА! Це видалить усі замовлення, клієнтів і налаштування на цьому ПК. Продовжити?')) return;
       db = createEmptyDB();
       localStorage.removeItem(STORAGE_KEY);
-      if (StorageEngine.isElectron && window.electronAPI.saveDB) {
-        window.electronAPI.saveDB(db, false);
-      }
+      StorageEngine.save(false);
       checkFirstRunSetup();
     }
 
     // =========================================================================
-    // 19. SPELLCHECK & ESC MODAL CLOSE
-    // =========================================================================
-    function bindSpellcheckInputs(rootEl) {
-      if (!rootEl) return;
-      rootEl.querySelectorAll('textarea, input[type="text"], input:not([type])').forEach(el => {
-        if (el.id && (el.id.includes('phone') || el.id.includes('serial') || el.id.includes('url'))) return;
-        el.setAttribute('spellcheck', 'true');
-        el.setAttribute('lang', 'uk,ru,en');
-      });
-    }
-
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') {
-        const modalRoot = document.getElementById('modal-root');
-        if (modalRoot && !modalRoot.classList.contains('hidden')) {
-          e.preventDefault();
-          closeModal();
-        }
-      }
-    });
-
-    // =========================================================================
-    // 19B. ENHANCED REAL-TIME FIREBASE SYNC ENGINE (MULTI-PC & WORKS FIX)
+    // 20. REAL-TIME FIREBASE SYNC (STRUCTURED NODES + LIVE MULTI-PC SYNC)
     // =========================================================================
     const FirebaseSync = {
       app: null,
-      dbRef: null,
+      database: null,
       rootRef: null,
       connected: false,
       isApplyingRemote: false,
-      lastSyncAt: '',
-      lastError: '',
       _pushTimer: null,
+      _lastPushedJson: '',
+      _lastStatusText: 'Не підключено',
+      _lastStatusColor: 'gray',
 
-      normalizeConfig(raw) {
-        const cfg = raw || {};
-        let url = String(cfg.databaseURL || cfg.url || '').trim();
-        url = url.replace(/\.json$/i, '').replace(/\/+$/, '');
-        if (url && !/^https?:\/\//i.test(url)) url = 'https://' + url;
-        const apiKey = String(cfg.apiKey || '').trim();
-        let path = String(cfg.path || 'crm_data').trim().replace(/^\/+|\/+$/g, '');
-        if (!path) path = 'crm_data';
-        return { databaseURL: url, apiKey, path };
+      getBasePath() {
+        const raw = (db.firebaseConfig && db.firebaseConfig.path) ? String(db.firebaseConfig.path).trim() : 'crm_data';
+        return raw.replace(/^\/+|\/+$/g, '') || 'crm_data';
       },
 
-      updateStatusIndicators() {
+      setStatus(text, color = 'gray') {
+        this._lastStatusText = text;
+        this._lastStatusColor = color;
         const badgeText = document.getElementById('storage-badge-text');
         const badgeDot = document.getElementById('storage-badge-dot');
-        const sbState = document.getElementById('sidebar-backup-state');
-        if (this.connected) {
-          if (badgeText) badgeText.textContent = 'Firebase Live' + (this.lastSyncAt ? ` (${this.lastSyncAt})` : '');
-          if (badgeDot) {
-            badgeDot.className = 'w-2 h-2 rounded-full bg-emerald-500 animate-pulse';
-          }
-          if (sbState) sbState.textContent = 'Firebase Live';
+        if (badgeText) badgeText.textContent = text;
+        if (badgeDot) {
+          const colors = {
+            green: 'bg-emerald-500',
+            amber: 'bg-amber-400 animate-pulse',
+            red: 'bg-red-500',
+            gray: 'bg-gray-400'
+          };
+          badgeDot.className = 'w-2 h-2 rounded-full ' + (colors[color] || colors.gray);
         }
-        const liveBox = document.getElementById('fb-live-diag-text');
-        if (liveBox) {
-          const mastersCount = (db.employees || []).filter(e => e.role === 'master').length;
-          const totalStaff = (db.employees || []).length;
-          const hasAdminPass = Boolean(db.directorPasswordHash || db.masterPasswordHash || db.adminPasswordHash);
-          liveBox.innerHTML = this.connected
-            ? `<span class="text-emerald-700 font-semibold">● Підключено до Firebase Live</span> • Остання синхронізація: <strong>${this.lastSyncAt || 'щойно'}</strong> • Співробітників: <strong>${totalStaff}</strong> (майстрів: ${mastersCount}), ремонтів: <strong>${(db.orders || []).length}</strong> • Пароль Директора: <strong>${hasAdminPass ? 'синхронізовано' : 'не задано'}</strong>`
-            : `<span class="text-gray-500">○ Firebase не підключено</span>${this.lastError ? ` <span class="text-red-600">(${escapeHtml(this.lastError)})</span>` : ''}`;
-        }
+        const diagBox = document.getElementById('fb-diag-status');
+        if (diagBox) diagBox.textContent = text;
       },
 
-      async initSdk(cfg) {
-        if (typeof firebase === 'undefined' || !firebase.initializeApp) {
-          throw new Error('Firebase SDK не завантажився. Перевірте підключення до інтернету.');
-        }
-        if (firebase.apps && firebase.apps.length > 0) {
-          await Promise.all(firebase.apps.map(a => a.delete().catch(() => {})));
-        }
-        this.app = firebase.initializeApp({
-          apiKey: cfg.apiKey || 'AIzaSyDummyKeyForRealtimeDB',
-          databaseURL: cfg.databaseURL
-        });
-        this.dbRef = firebase.database(this.app);
-        this.rootRef = this.dbRef.ref(cfg.path);
+      buildStructuredPayload() {
+        return {
+          meta: {
+            initialized: Boolean(db.initialized),
+            companyName: db.companyName || '',
+            companyPhone: db.companyPhone || '',
+            companyAddress: db.companyAddress || '',
+            directorPasswordHash: db.directorPasswordHash || '',
+            defaultWarrantyDays: Number(db.defaultWarrantyDays) || 30,
+            cloudUpdateUrl: db.cloudUpdateUrl || '',
+            updatedAt: Date.now()
+          },
+          branches: arrayToFirebaseMap(db.branches, 'br'),
+          employees: arrayToFirebaseMap(db.employees, 'emp'),
+          orders: arrayToFirebaseMap(db.orders, 'ord'),
+          clients: arrayToFirebaseMap(db.clients, 'cli'),
+          parts: arrayToFirebaseMap(db.parts, 'part'),
+          receiptTemplates: db.receiptTemplates || createDefaultReceiptTemplates()
+        };
       },
 
       applyRemoteSnapshot(val) {
         if (!val || typeof val !== 'object') return false;
-        const meta = (val.meta && typeof val.meta === 'object') ? val.meta : val;
-        const remoteEmployees = toArrayFromFirebase(val.employees || meta.employees);
-        const remoteBranches = toArrayFromFirebase(val.branches || meta.branches);
-        const remoteOrders = toArrayFromFirebase(val.orders);
-        const remoteClients = toArrayFromFirebase(val.clients);
-        const remoteParts = toArrayFromFirebase(val.parts);
+        const meta = val.meta && typeof val.meta === 'object' ? val.meta : val;
+        const incomingOrders = toArrayFromFirebase(val.orders);
+        const incomingClients = toArrayFromFirebase(val.clients);
+        const incomingParts = toArrayFromFirebase(val.parts);
+        const incomingBranches = toArrayFromFirebase(val.branches);
+        const incomingEmployees = toArrayFromFirebase(val.employees);
 
         const hasMeaningfulData = Boolean(
           meta.companyName ||
-          remoteEmployees.length > 0 ||
-          remoteOrders.length > 0 ||
-          remoteClients.length > 0
+          incomingOrders.length > 0 ||
+          incomingClients.length > 0 ||
+          incomingEmployees.length > 0
         );
         if (!hasMeaningfulData) return false;
 
         this.isApplyingRemote = true;
-        let repairedDates = false;
         try {
           if (meta.companyName) db.companyName = meta.companyName;
-          const remotePassHash = meta.directorPasswordHash || meta.masterPasswordHash || meta.adminPasswordHash || val.directorPasswordHash || '';
-          if (remotePassHash) {
-            db.directorPasswordHash = remotePassHash;
-            delete db.masterPasswordHash;
-            delete db.adminPasswordHash;
+          if (meta.companyPhone !== undefined) db.companyPhone = meta.companyPhone;
+          if (meta.companyAddress !== undefined) db.companyAddress = meta.companyAddress;
+          const remoteDirHash = meta.directorPasswordHash || meta.masterPasswordHash || meta.adminPasswordHash || meta.directorPassword || meta.masterPassword;
+          if (remoteDirHash) {
+            db.directorPasswordHash = String(remoteDirHash).trim();
+          } else if (db.directorPasswordHash) {
+            setTimeout(() => this.pushFullDB(true), 200);
           }
           if (meta.defaultWarrantyDays) db.defaultWarrantyDays = Number(meta.defaultWarrantyDays) || 30;
-          if (meta.cloudUpdateUrl !== undefined) {
-            const prevUrl = db.cloudUpdateUrl || '';
-            db.cloudUpdateUrl = String(meta.cloudUpdateUrl || '');
-            if (db.cloudUpdateUrl && db.cloudUpdateUrl !== prevUrl && db.cloudAutoCheck !== false) {
-              setTimeout(() => CloudUpdater.checkForUpdates(true), 1500);
-            }
+          if (meta.cloudUpdateUrl) db.cloudUpdateUrl = meta.cloudUpdateUrl;
+
+          if (incomingBranches.length > 0) db.branches = incomingBranches;
+          if (incomingEmployees.length > 0) db.employees = incomingEmployees;
+          if (val.orders !== undefined) db.orders = incomingOrders;
+          if (val.clients !== undefined) db.clients = incomingClients;
+          if (val.parts !== undefined) db.parts = incomingParts;
+          if (val.receiptTemplates && typeof val.receiptTemplates === 'object') {
+            db.receiptTemplates = val.receiptTemplates;
           }
-          if (meta.receiptTemplates && typeof meta.receiptTemplates === 'object') {
-            db.receiptTemplates = { ...db.receiptTemplates, ...meta.receiptTemplates };
-          }
-          if (remoteEmployees.length > 0) db.employees = remoteEmployees;
-          if (remoteBranches.length > 0) db.branches = remoteBranches;
-          db.orders = remoteOrders;
-          db.clients = remoteClients;
-          db.parts = remoteParts;
+
           db.initialized = true;
-
-          repairedDates = normalizeAndMigrateDB();
+          normalizeAndMigrateDB();
           ensureReceiptTemplates();
-
-          const now = new Date();
-          this.lastSyncAt = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
-          this.connected = true;
-          this.lastError = '';
-
+          this._lastPushedJson = JSON.stringify(this.buildStructuredPayload());
           StorageEngine.save(false);
-          this.updateStatusIndicators();
 
-          const modalRoot = document.getElementById('modal-root');
-          const modalOpen = modalRoot && !modalRoot.classList.contains('hidden');
-          if (!modalOpen) {
-            refreshShellUI();
-            renderWorkspace();
-          } else {
-            refreshShellUI();
-          }
-          return true;
+          const setupScreen = document.getElementById('setup-screen');
+          if (setupScreen) setupScreen.classList.add('hidden');
+          refreshShellUI();
+          renderWorkspace();
         } finally {
           this.isApplyingRemote = false;
-          if (repairedDates) {
-            this.schedulePush();
-          }
         }
+        return true;
       },
 
-      attachListeners() {
-        if (!this.rootRef) return;
-        this.rootRef.off();
-        this.rootRef.on('value', (snap) => {
-          const val = snap.val();
-          if (val) {
-            this.applyRemoteSnapshot(val);
-          } else {
-            this.connected = true;
-            this.updateStatusIndicators();
-          }
-        }, (err) => {
-          this.lastError = err && err.message ? err.message : 'Помилка читання Firebase';
-          this.updateStatusIndicators();
-        });
-      },
-
-      async connect(rawCfg, opts = {}) {
-        const cfg = this.normalizeConfig(rawCfg || db.firebaseConfig);
-        if (!cfg.databaseURL) {
-          if (!opts.silent) showToast('Вкажіть Database URL проєкту Firebase!', 'error');
+      async connect(cfg, silent = false) {
+        if (!cfg || !cfg.databaseURL) {
+          if (!silent) showToast('Вкажіть Database URL у налаштуваннях Firebase!', 'error');
           return false;
         }
+        if (typeof firebase === 'undefined') {
+          if (!silent) showToast('SDK Firebase не завантажено (перевірте інтернет).', 'error');
+          return false;
+        }
+
         try {
-          await this.initSdk(cfg);
-          const snap = await Promise.race([
-            this.rootRef.once('value'),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('Таймаут підключення до Firebase (12 сек). Перевірте URL та інтернет.')), 12000))
-          ]);
-          const val = snap.val();
+          const cleanUrl = String(cfg.databaseURL).trim().replace(/\/+$/, '');
+          const cleanPath = String(cfg.path || 'crm_data').trim().replace(/^\/+|\/+$/g, '') || 'crm_data';
+          db.firebaseConfig = {
+            apiKey: String(cfg.apiKey || '').trim(),
+            databaseURL: cleanUrl,
+            projectId: String(cfg.projectId || '').trim(),
+            path: cleanPath
+          };
 
-          db.firebaseConfig = cfg;
-          this.connected = true;
-          this.lastError = '';
-
-          if (opts.pullOnly) {
-            const loaded = this.applyRemoteSnapshot(val);
-            if (!loaded) {
-              throw new Error(`У базі Firebase за шляхом "${cfg.path}" ще немає даних! Спочатку натисніть "Вивантажити локальну базу" на головному ПК.`);
-            }
-          } else {
-            const hasRemote = val && (val.meta?.companyName || val.companyName || toArrayFromFirebase(val.employees).length > 0);
-            if (hasRemote && !opts.forcePush) {
-              this.applyRemoteSnapshot(val);
-            } else if (db.initialized && (db.companyName || (db.employees || []).length > 0)) {
-              await this.pushFullDB(true);
-            }
+          if (this.rootRef) {
+            try { this.rootRef.off(); } catch (e) {}
+          }
+          if (this.app) {
+            try { await this.app.delete(); } catch (e) {}
           }
 
+          this.setStatus('Підключення до хмари...', 'amber');
+          this.app = firebase.initializeApp({
+            apiKey: db.firebaseConfig.apiKey || 'AIzaSyDummyKeyForPublicRTDB',
+            databaseURL: db.firebaseConfig.databaseURL,
+            projectId: db.firebaseConfig.projectId || undefined
+          }, 'sc_crm_rtdb_' + Date.now());
+
+          this.database = this.app.database();
+          this.rootRef = this.database.ref(cleanPath);
+
+          const initialSnap = await Promise.race([
+            this.rootRef.once('value'),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('Таймаут зʼєднання з Firebase (10 сек). Перевірте URL або інтернет.')), 10000))
+          ]);
+
+          const remoteVal = initialSnap.val();
+          this.connected = true;
+
+          const hasRemote = this.applyRemoteSnapshot(remoteVal);
+          if (!hasRemote && db.initialized) {
+            await this.pushFullDB(true);
+          }
+
+          this.rootRef.on('value', (snap) => {
+            const val = snap.val();
+            if (!val) return;
+            this.applyRemoteSnapshot(val);
+            this.setStatus('Хмара онлайн (жива синхронізація)', 'green');
+          }, (err) => {
+            console.error('Firebase listener error:', err);
+            this.setStatus('Помилка доступу до Firebase Rules', 'red');
+            showToast('Помилка прав Firebase: ' + err.message, 'error');
+          });
+
           StorageEngine.save(false);
-          this.attachListeners();
-          this.updateStatusIndicators();
-          if (!opts.silent) showToast('Firebase Live успішно підключено!');
+          this.setStatus('Хмара онлайн (жива синхронізація)', 'green');
+          if (!silent) showToast('Підключено до Firebase! Дані синхронізуються автоматично.');
           return true;
         } catch (err) {
           this.connected = false;
-          this.lastError = err.message || String(err);
-          this.updateStatusIndicators();
-          if (!opts.silent) showToast('Помилка Firebase: ' + this.lastError, 'error');
-          return false;
-        }
-      },
-
-      async pushFullDB(silent = false) {
-        if (!this.rootRef || !this.connected) return false;
-        try {
-          const unifiedPassHash = db.directorPasswordHash || db.masterPasswordHash || db.adminPasswordHash || '';
-          if (unifiedPassHash && !db.directorPasswordHash) {
-            db.directorPasswordHash = unifiedPassHash;
-          }
-          const payload = {
-            meta: {
-              companyName: db.companyName || '',
-              directorPasswordHash: unifiedPassHash,
-              defaultWarrantyDays: Number(db.defaultWarrantyDays) || 30,
-              cloudUpdateUrl: db.cloudUpdateUrl || '',
-              receiptTemplates: db.receiptTemplates || {},
-              updatedAt: Date.now()
-            },
-            employees: arrayToFirebaseMap(db.employees, 'emp'),
-            branches: arrayToFirebaseMap(db.branches, 'br'),
-            orders: arrayToFirebaseMap(db.orders, 'ord'),
-            clients: arrayToFirebaseMap(db.clients, 'cli'),
-            parts: arrayToFirebaseMap(db.parts, 'part')
-          };
-          await this.rootRef.set(payload);
-          const now = new Date();
-          this.lastSyncAt = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
-          this.updateStatusIndicators();
-          if (!silent) showToast('Усю базу (включно з майстрами та сумами) вивантажено у Firebase!');
-          return true;
-        } catch (err) {
-          this.lastError = err.message || String(err);
-          this.updateStatusIndicators();
-          if (!silent) showToast('Помилка вивантаження у Firebase: ' + this.lastError, 'error');
+          this.setStatus('Помилка підключення до хмари', 'red');
+          if (!silent) showToast('Помилка Firebase: ' + err.message, 'error');
           return false;
         }
       },
 
       schedulePush() {
-        if (!this.connected || this.isApplyingRemote || !db.initialized) return;
+        if (!this.connected || !this.rootRef || this.isApplyingRemote) return;
         clearTimeout(this._pushTimer);
-        this._pushTimer = setTimeout(() => {
-          this.pushFullDB(true);
-        }, 350);
+        this.setStatus('Збереження у хмару...', 'amber');
+        this._pushTimer = setTimeout(() => this.pushFullDB(false), 350);
       },
 
-      syncMeta() { this.schedulePush(); },
-      syncEmployees() { this.schedulePush(); },
-      syncBranches() { this.schedulePush(); },
-      syncOrder() { this.schedulePush(); },
-      deleteOrderRemote() { this.schedulePush(); },
-      syncClient() { this.schedulePush(); },
-      syncPart() { this.schedulePush(); },
+      async pushFullDB(force = false) {
+        if (!this.connected || !this.rootRef) return false;
+        try {
+          const payload = this.buildStructuredPayload();
+          const serialized = JSON.stringify(payload);
+          if (!force && serialized === this._lastPushedJson) {
+            this.setStatus('Хмара онлайн (жива синхронізація)', 'green');
+            return true;
+          }
+          await this.rootRef.set(payload);
+          this._lastPushedJson = serialized;
+          this.setStatus('Хмара онлайн (жива синхронізація)', 'green');
+          return true;
+        } catch (err) {
+          console.error('Firebase push error:', err);
+          this.setStatus('Помилка запису у Firebase', 'red');
+          showToast('Не вдалося записати в Firebase: ' + err.message, 'error');
+          return false;
+        }
+      },
 
-      disconnect() {
+      async pullNow() {
+        if (!this.connected || !this.rootRef) {
+          showToast('Спочатку підключіть Firebase!', 'error');
+          return;
+        }
+        try {
+          this.setStatus('Завантаження з хмари...', 'amber');
+          const snap = await this.rootRef.once('value');
+          const ok = this.applyRemoteSnapshot(snap.val());
+          this.setStatus('Хмара онлайн (жива синхронізація)', 'green');
+          if (ok) showToast('Дані успішно оновлено з хмари Firebase!');
+          else showToast('У хмарі Firebase за цим шляхом база поки порожня.', 'error');
+        } catch (err) {
+          this.setStatus('Помилка читання з хмари', 'red');
+          showToast('Помилка читання Firebase: ' + err.message, 'error');
+        }
+      },
+
+      async disconnect() {
         if (this.rootRef) {
           try { this.rootRef.off(); } catch (e) {}
         }
-        this.connected = false;
+        if (this.app) {
+          try { await this.app.delete(); } catch (e) {}
+        }
+        this.app = null;
+        this.database = null;
         this.rootRef = null;
+        this.connected = false;
         db.firebaseConfig = null;
         StorageEngine.save(false);
-        this.updateStatusIndicators();
-        renderWorkspace();
-        showToast('Firebase відключено');
+        this.setStatus(StorageEngine.isElectron ? t('storageBackupActive') : t('storageBrowser'), 'green');
+        showToast('Хмарну синхронізацію Firebase вимкнено.');
+        if (currentView === 'settings') renderWorkspace();
       }
     };
 
     async function connectFirebaseFromSetup() {
-      const url = document.getElementById('setup-fb-url')?.value || '';
-      const key = document.getElementById('setup-fb-key')?.value || '';
-      const path = document.getElementById('setup-fb-path')?.value || 'crm_data';
-      const ok = await FirebaseSync.connect({ databaseURL: url, apiKey: key, path }, { pullOnly: true });
-      if (ok) {
-        const setupEl = document.getElementById('setup-screen');
-        if (setupEl) setupEl.classList.add('hidden');
-        PrinterManager.refresh(true);
+      const url = (document.getElementById('setup-fb-url')?.value || '').trim();
+      const apiKey = (document.getElementById('setup-fb-key')?.value || '').trim();
+      const path = (document.getElementById('setup-fb-path')?.value || 'crm_data').trim();
+      if (!url) {
+        showToast('Вкажіть Database URL проєкту Firebase!', 'error');
+        return;
+      }
+      const ok = await FirebaseSync.connect({ databaseURL: url, apiKey, path }, false);
+      if (ok && db.initialized) {
+        document.getElementById('setup-screen')?.classList.add('hidden');
         refreshShellUI();
         renderWorkspace();
-        const mastersCount = (db.employees || []).filter(e => e.role === 'master').length;
-        showToast(`Базу підключено! Майстрів: ${mastersCount}, ремонтів: ${(db.orders || []).length}`);
+      } else if (ok && !db.initialized) {
+        showToast('Підключено, але в хмарі ще немає даних. Створіть первинну базу у формі вище — вона автоматично завантажиться в хмару!');
       }
     }
 
     function injectFirebaseDiagnosticControls() {
-      if (typeof currentView === 'undefined' || currentView !== 'settings') return;
+      if (currentView !== 'settings') return;
       const ws = document.getElementById('workspace');
-      if (!ws || document.getElementById('fb-live-diag-box')) return;
-      const fbInputs = ws.querySelectorAll('input[placeholder*="firebasedatabase.app"], input[id*="fb"]');
-      const targetCard = fbInputs.length > 0 ? fbInputs[0].closest('.bg-white') : null;
-      if (!targetCard) return;
-
-      const diagDiv = document.createElement('div');
-      diagDiv.id = 'fb-live-diag-box';
-      diagDiv.className = 'mt-3 p-3 rounded-xl bg-teal-50/70 border border-teal-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs';
-      diagDiv.innerHTML = `
-        <div id="fb-live-diag-text" class="text-gray-700">Перевірка стану Firebase...</div>
-        <div class="flex flex-wrap items-center gap-2 shrink-0">
-          <button type="button" onclick="FirebaseSync.pushFullDB(false)" class="px-3 py-1.5 rounded-lg bg-[#1c6457] hover:bg-[#154e44] text-white font-semibold">
-            ⬆ Вивантажити базу та майстрів
+      if (!ws || document.getElementById('fb-diag-panel')) return;
+      const panel = document.createElement('div');
+      panel.id = 'fb-diag-panel';
+      panel.className = 'mt-4 p-4 rounded-2xl bg-gray-50 border border-gray-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs';
+      panel.innerHTML = `
+        <div>
+          <div class="font-bold text-gray-800">Стан живого зʼєднання Firebase Realtime Database:</div>
+          <div id="fb-diag-status" class="text-teal-700 font-semibold mt-0.5">${escapeHtml(FirebaseSync._lastStatusText)}</div>
+          <div class="text-[11px] text-gray-500 mt-0.5">Синхронізовано: ${db.orders.length} ремонтів, ${db.clients.length} клієнтів, ${db.parts.length} запчастин, ${db.employees.length} співробітників</div>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <button type="button" onclick="FirebaseSync.pullNow()" class="px-3.5 py-2 rounded-xl border border-gray-300 bg-white hover:bg-gray-100 font-semibold text-gray-700">
+            ⬇ Завантажити з хмари зараз
           </button>
-          <button type="button" onclick="FirebaseSync.connect(db.firebaseConfig, { pullOnly: true })" class="px-3 py-1.5 rounded-lg border border-teal-300 bg-white hover:bg-teal-50 text-[#143430] font-semibold">
-            ⬇ Завантажити з Firebase
+          <button type="button" onclick="FirebaseSync.pushFullDB(true).then(ok => { if(ok) showToast('Всю базу відправлено у хмару Firebase!'); })" class="px-3.5 py-2 rounded-xl bg-[#1c6457] hover:bg-[#154e44] text-white font-semibold">
+            ⬆ Відправити всю базу у хмару
           </button>
         </div>
       `;
-      targetCard.appendChild(diagDiv);
-      FirebaseSync.updateStatusIndicators();
+      ws.appendChild(panel);
     }
 
     // =========================================================================
-    // 20. BOOTSTRAP
+    // 21. APPLICATION BOOTSTRAP
     // =========================================================================
-    window.addEventListener('DOMContentLoaded', async () => {
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        const modalRoot = document.getElementById('modal-root');
+        if (modalRoot && !modalRoot.classList.contains('hidden')) {
+          event.preventDefault();
+          closeModal();
+        }
+      }
+    });
+
+    document.addEventListener('DOMContentLoaded', async () => {
+      try {
+        const savedLang = localStorage.getItem('sc_crm_lang');
+        if (savedLang === 'ru' || savedLang === 'ua') currentLang = savedLang;
+      } catch (e) {}
+
       await StorageEngine.init();
-      const repairedOnInit = normalizeAndMigrateDB();
+      const repairedDates = normalizeAndMigrateDB();
       ensureReceiptTemplates();
-      if (repairedOnInit) StorageEngine.save(false);
+
+      if (repairedDates) {
+        StorageEngine.save(false);
+      }
+
+      if (StorageEngine.isElectron) {
+        await PrinterManager.refresh(true);
+      }
+
+      FirebaseSync.setStatus(StorageEngine.isElectron ? t('storageBackupActive') : t('storageBrowser'), 'green');
       checkFirstRunSetup();
-
-      const wsEl = document.getElementById('workspace');
-      if (wsEl) {
-        new MutationObserver(() => injectFirebaseDiagnosticControls()).observe(wsEl, { childList: true });
-      }
-
-      const modalBox = document.getElementById('modal-box');
-      if (modalBox) {
-        new MutationObserver(() => bindSpellcheckInputs(modalBox)).observe(modalBox, { childList: true });
-      }
+      setLang(currentLang);
 
       if (db.firebaseConfig && db.firebaseConfig.databaseURL) {
-        await FirebaseSync.connect(db.firebaseConfig, { silent: true });
+        FirebaseSync.connect(db.firebaseConfig, true).then((ok) => {
+          if (ok && repairedDates) {
+            FirebaseSync.pushFullDB(true);
+          }
+        });
       }
 
-      if (db.initialized) {
-        PrinterManager.refresh(true);
-        refreshShellUI();
-        renderWorkspace();
-        injectFirebaseDiagnosticControls();
-        if (db.cloudUpdateUrl && db.cloudAutoCheck !== false) {
-          setTimeout(() => CloudUpdater.checkForUpdates(true), 2500);
-        }
+      if (db.cloudUpdateUrl && db.cloudAutoCheck !== false) {
+        setTimeout(() => CloudUpdater.checkForUpdates(true), 2500);
       }
     });
   </script>
