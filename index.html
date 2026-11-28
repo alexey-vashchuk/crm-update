@@ -161,6 +161,39 @@
     @media(min-width:1000px){.receipt-editor-columns{grid-template-columns:minmax(0,1fr) minmax(0,1.15fr)} .receipt-preview-panel{position:sticky;top:0}}
     #rt-preview-scroll {max-height:75vh;padding:4px;overscroll-behavior:contain;}
     #print-area.receipt-print-ready {display:block;position:fixed;left:-100000px;top:0;visibility:hidden;}
+
+    /* Compact mode leaves tabs, filters, create-order and profile controls accessible. */
+    .header-compact #app-header { height: 38px; padding-inline: 12px; gap: 8px; }
+    .header-compact #app-header > div { gap: 6px; }
+    .header-compact #app-header button, .header-compact #app-header select { padding-block: 3px; }
+    .header-compact #workspace { padding: 8px 12px; }
+    .header-compact .orders-page { gap: 6px; }
+    .header-compact .orders-title-block { flex-direction: row; align-items: center; gap: 8px; }
+    .header-compact .orders-title-block h1 { font-size: 15px; line-height: 20px; }
+    .header-compact .orders-title-block p, .header-compact .orders-kpi-block { display: none !important; }
+    .header-compact .orders-title-block > button { padding: 5px 10px; }
+    .header-compact .orders-tabs-block { padding-bottom: 4px; gap: 4px; }
+    .header-compact .orders-tabs-block > button { padding: 5px 9px; }
+    .header-compact .orders-filter-block { padding: 5px 8px; gap: 5px; }
+    .header-compact .orders-filter-block input, .header-compact .orders-filter-block select { padding-block: 5px; }
+    .header-compact .orders-list-scroll th, .header-compact .orders-list-scroll td { padding-top: 7px; padding-bottom: 7px; }
+    @media (min-width: 768px) and (min-height: 480px) {
+      .header-compact #workspace.workspace-orders { display: flex; overflow: hidden; }
+      .header-compact .orders-page { height: 100%; }
+      .header-compact .orders-list-scroll { min-height: 0; }
+    }
+    @media (max-width: 767px) {
+      #app-header { height: auto; min-height: 38px; flex-wrap: wrap; padding-block: 5px; }
+      #app-header > div { flex-wrap: wrap; min-width: 0; }
+      .header-compact #app-header { height: auto; }
+      .header-compact .orders-title-block { flex-wrap: wrap; }
+    }
+    @media (min-width: 768px) and (max-width: 1279px) {
+      #app-header { height: auto; min-height: 56px; flex-wrap: wrap; padding-block: 4px; }
+      #app-header > div { flex-wrap: wrap; min-width: 0; }
+      .header-compact #app-header { height: auto; min-height: 38px; }
+      #compact-header-label { display: none; }
+    }
   </style>
   <style id="dynamic-print-style"></style>
 </head>
@@ -302,7 +335,7 @@
         <div class="flex items-center justify-between sb-center-compact">
           <span class="sb-hide-compact">Backup:</span>
           <span class="text-[#4fd1b5] font-medium inline-flex items-center gap-1" title="Резервне копіювання активне">
-            <span class="w-2 h-2 rounded-full bg-[#4fd1b5] inline-block"></span>
+            <span id="sidebar-backup-dot" class="w-2 h-2 rounded-full bg-[#4fd1b5] inline-block"></span>
             <span class="sb-hide-compact" id="sidebar-backup-state">Активний</span>
           </span>
         </div>
@@ -317,7 +350,7 @@
     <!-- MAIN CONTENT WRAPPER -->
     <div id="main-content-wrapper" class="flex-1 flex flex-col min-w-0">
       <!-- TOP HEADER BAR -->
-      <header class="h-14 bg-white border-b border-gray-200 px-4 lg:px-6 flex items-center justify-between gap-3 sticky top-0 z-20">
+      <header id="app-header" class="h-14 bg-white border-b border-gray-200 px-4 lg:px-6 flex items-center justify-between gap-3 sticky top-0 z-20">
         <!-- Left controls -->
         <div class="flex items-center gap-3">
           <button onclick="toggleSidebar(true)" class="p-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 lg:hidden">
@@ -338,6 +371,10 @@
 
         <!-- Right controls -->
         <div class="flex items-center gap-2 sm:gap-3">
+          <button type="button" id="compact-header-toggle" onclick="toggleCompactHeader()" aria-pressed="false" title="Компактний режим" class="inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 text-xs font-medium shrink-0">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path id="compact-header-icon" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7l5 5 5-5M7 17l5-5 5 5"/></svg>
+            <span id="compact-header-label" class="hidden lg:inline">Компактно</span>
+          </button>
           <!-- Storage / Backup Indicator (Visible only to Director) -->
           <button onclick="navigate('settings')" id="storage-status-pill" title="Стан резервного копіювання та БД" class="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-gray-200 bg-gray-50 hover:bg-gray-100 text-xs font-medium text-gray-700 transition-colors">
             <span id="storage-badge-dot" class="w-2 h-2 rounded-full bg-emerald-500"></span>
@@ -395,7 +432,7 @@
     // =========================================================================
     // 0. APPLICATION VERSION & CLOUD UPDATE METADATA
     // =========================================================================
-    const APP_VERSION = '2.2.11';
+    const APP_VERSION = '2.2.13';
     const APP_BUILD_DATE = '2026-11-27';
     const STORAGE_KEY = 'sc_crm_db_v2';
 
@@ -1056,18 +1093,34 @@
     }
 
     // =========================================================================
-    // 5. STORAGE ENGINE, PRINTER MANAGER & CLOUD UPDATER
+    // 5. STORAGE ENGINE — durable local saves, compatible with legacy Electron
     // =========================================================================
     const StorageEngine = {
       isElectron: Boolean(window.electronAPI && window.electronAPI.isElectron),
       backupDir: '', _lastSnapshotTs: 0, _timer: null, _dirty: false, _force: false, _saving: null, _idb: null,
+      _rev: 0, _durableRev: 0, _state: 'saved', _lastError: '', _retryDelay: 2000,
+      localOnly() { return !db?.firebaseConfig?.databaseURL; },
+      revision(value) { return Number.isSafeInteger(value?._localSaveRevision) && value._localSaveRevision > 0 ? value._localSaveRevision : 0; },
+      valid(value) { return !!value && typeof value === 'object' && !Array.isArray(value) && (typeof value.initialized === 'boolean' || Array.isArray(value.orders) || !!value.companyName); },
+      setState(state, error = '') {
+        this._state = state; this._lastError = error;
+        const el = document.getElementById('sidebar-backup-state');
+        const dot = document.getElementById('sidebar-backup-dot');
+        const messages = currentLang === 'ru' ? {saved:'Сохранено',pending:'Сохранение…',fallback:'Резервная запись',error:'Ошибка сохранения'} : {saved:'Збережено',pending:'Збереження…',fallback:'Резервний запис',error:'Помилка збереження'};
+        if (dot) { dot.className = 'w-2 h-2 rounded-full inline-block ' + ({saved:'bg-[#4fd1b5]',pending:'bg-amber-300',fallback:'bg-amber-300',error:'bg-red-400'}[state] || ''); dot.title = error || messages[state]; }
+        if (el) { el.textContent = messages[state]; el.title = error || messages[state]; el.className = 'sb-hide-compact ' + ({saved:'text-[#4fd1b5]',pending:'text-amber-300',fallback:'text-amber-300',error:'text-red-300'}[state] || ''); }
+      },
       async openCache() {
-        if (!this._idb) this._idb = new Promise((resolve, reject) => {
-          const req = indexedDB.open('sc_crm_cache_v1', 1);
-          req.onupgradeneeded = () => req.result.createObjectStore('snapshots');
-          req.onsuccess = () => resolve(req.result);
-          req.onerror = () => reject(req.error);
-        });
+        if (!this._idb) {
+          this._idb = new Promise((resolve, reject) => {
+            const req = indexedDB.open('sc_crm_cache_v1', 1);
+            req.onupgradeneeded = () => { if (!req.result.objectStoreNames.contains('snapshots')) req.result.createObjectStore('snapshots'); };
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+            req.onblocked = () => reject(new Error('IndexedDB blocked'));
+          });
+          this._idb.catch(() => { this._idb = null; });
+        }
         return this._idb;
       },
       async cacheGet(key = STORAGE_KEY) {
@@ -1082,85 +1135,145 @@
         return new Promise((resolve, reject) => {
           const tx = cache.transaction('snapshots', 'readwrite');
           tx.objectStore('snapshots').put(value, key);
-          tx.oncomplete = resolve; tx.onerror = tx.onabort = () => reject(tx.error);
+          tx.oncomplete = resolve; tx.onerror = tx.onabort = () => reject(tx.error || new Error('IndexedDB transaction aborted'));
         });
       },
       async init() {
-        let loaded = null;
-        try {
-          if (this.isElectron && window.electronAPI.loadDB) {
+        const candidates = []; let diskError = null;
+        const add = (source,value) => { if (this.valid(value)) candidates.push({source,value,rev:this.revision(value)}); };
+        if (this.isElectron && window.electronAPI.loadDB) {
+          try {
             const res = await window.electronAPI.loadDB();
             if (res?.backupDir) this.backupDir = res.backupDir;
-            if (res?.ok && res.data) loaded = res.data;
-          } else {
-            loaded = await this.cacheGet();
-          }
-        } catch (e) { console.error('DB load:', e); }
-        try {
-          const emergency = localStorage.getItem(STORAGE_KEY + '_emergency');
-          if (emergency) { loaded = JSON.parse(emergency); this._dirty = true; }
-          else if (!loaded) {
-            const raw = localStorage.getItem(STORAGE_KEY);
-            if (raw) loaded = JSON.parse(raw);
-          }
-        } catch (e) { console.error('Local cache load:', e); }
-        db = { ...createEmptyDB(), ...(loaded || {}) };
+            if (!res?.ok) throw new Error(res?.error || 'load-db failed');
+            add('disk',res.data);
+          } catch(e) { diskError = e; console.error('DB load:',e); }
+        }
+        // The local cache is a recovery copy, not an unconditional replacement for the disk file.
+        try { add('indexed',await this.cacheGet()); } catch(e) { console.error('Cache load:',e); }
+        for (const [source,key] of [['legacy',STORAGE_KEY],['emergency',STORAGE_KEY+'_emergency']]) {
+          try { const raw = localStorage.getItem(key); if (raw) add(source,JSON.parse(raw)); } catch(e) { console.error('Local cache load:',e); }
+        }
+        const priority = {disk:4,indexed:3,legacy:1,emergency:2};
+        // Unversioned emergency copies from older releases can be newer OR stale; prefer a readable primary file.
+        candidates.sort((a,b) => b.rev-a.rev || priority[b.source]-priority[a.source]);
+        const best = candidates[0];
+        // Keep an ambiguous pre-2.2.13 emergency snapshot separately before clearing it.
+        const oldEmergency = candidates.find(c => c.source === 'emergency' && !c.rev);
+        if (oldEmergency && best !== oldEmergency) {
+          try { await this.cachePut(oldEmergency.value, STORAGE_KEY+'_legacy_emergency_recovery'); }
+          catch(e) { console.error('Legacy emergency preservation:',e); this._preserveEmergency = true; }
+        }
+        if (diskError && !best) throw new Error('Не вдалося прочитати локальну базу: '+diskError.message);
+        db = { ...createEmptyDB(), ...(best?.value || {}) };
+        this._rev = this._durableRev = best?.rev || 0;
+        if (best && ((this.isElectron && best.source !== 'disk') || (!this.isElectron && best.source === 'emergency'))) {
+          this._dirty = true; this._force = true;
+          this.setState('pending');
+          showToast('Відновлено локальну копію бази. Перевірте останні записи.');
+        }
       },
       shouldCreateSnapshot(force) {
         if (force) return true;
         const freq = db.backupFrequency || '15m';
         if (freq === 'manual') return false;
         if (freq === 'every_change') return true;
-        const intervals = { '15m': 900000, '1h': 3600000, daily: 86400000 };
-        return Date.now() - this._lastSnapshotTs >= (intervals[freq] || 900000);
+        const intervals = {'15m':900000,'1h':3600000,daily:86400000};
+        return Date.now()-this._lastSnapshotTs >= (intervals[freq] || 900000);
       },
       save(forceSnapshot = false) {
+        this._rev = Math.max(Date.now(), this._rev + 1);
+        db._localSaveRevision = this._rev;
         this._dirty = true; this._force ||= forceSnapshot;
+        this.setState('pending');
         clearTimeout(this._timer);
-        this._timer = setTimeout(() => this.flush(), forceSnapshot ? 0 : 250);
+        // Local-only operations begin IPC/IDB immediately, even with an old EXE/preload.
+        if (this.localOnly() || forceSnapshot) return this.flush();
+        this._timer = setTimeout(() => this.flush(),250);
+        return Promise.resolve(false); // queued, not yet durable
       },
       async flush() {
         clearTimeout(this._timer);
-        if (this._saving) { await this._saving; if (this._dirty) return this.flush(); return true; }
+        if (this._saving) return this._saving;
         if (!this._dirty) return true;
-        const force = this._force; this._dirty = false; this._force = false;
-        const snap = this.shouldCreateSnapshot(force);
-        this._saving = (async () => {
-          try {
-            if (this.isElectron && window.electronAPI.saveDB) {
-              const res = await window.electronAPI.saveDB(db, snap);
+        // One writer at a time. Any mutation during a save is processed in the same drain loop.
+        this._saving = this.drain();
+        try { return await this._saving; } finally { this._saving = null; }
+      },
+      async drain() {
+        while (this._dirty) {
+          const force = this._force; this._dirty = false; this._force = false;
+          const rev = this._rev;
+          // Do not allow newer in-memory changes to alter a snapshot while it is being saved.
+          let snapshot;
+          try { snapshot = typeof structuredClone === 'function' ? structuredClone(db) : JSON.parse(JSON.stringify(db)); }
+          catch(e) { return this.failed(e,force); }
+          snapshot._localSaveRevision = rev;
+          const snap = this.shouldCreateSnapshot(force);
+          const local = !snapshot.firebaseConfig?.databaseURL;
+          let diskOK = false, cacheOK = false, error = null;
+          if (this.isElectron && window.electronAPI.saveDB) {
+            try {
+              const res = await window.electronAPI.saveDB(snapshot,snap);
               if (!res?.ok) throw new Error(res?.error || 'save-db failed');
-            } else {
-              try { await this.cachePut(db); }
-              catch (e) { localStorage.setItem(STORAGE_KEY, JSON.stringify(db)); }
-            }
-            if (snap) this._lastSnapshotTs = Date.now();
-            if (!this._dirty) localStorage.removeItem(STORAGE_KEY + '_emergency');
-            return true;
-          } catch (e) {
-            console.error('DB save:', e); this._dirty = true; this._force ||= force;
-            showToast('Помилка локального збереження: ' + e.message, 'error');
-            return false;
+              diskOK = true;
+              if (res.backupDir) this.backupDir = res.backupDir;
+              if (snap) this._lastSnapshotTs = Date.now();
+            } catch(e) { error=e; console.error('Disk save:',e); }
           }
-        })();
-        const ok = await this._saving; this._saving = null;
-        if (ok && this._dirty) { clearTimeout(this._timer); this._timer = setTimeout(() => this.flush(), 250); }
-        return ok;
+          if (!diskOK || local) {
+            try { await this.cachePut(snapshot); cacheOK=true; }
+            catch(e) {
+              if (!diskOK) {
+                try { localStorage.setItem(STORAGE_KEY,JSON.stringify(snapshot)); cacheOK=true; }
+                catch(err) { error=err; }
+              }
+            }
+          }
+          if (!diskOK && !cacheOK) return this.failed(error || new Error('No writable storage'),force);
+          this._durableRev = Math.max(this._durableRev,rev);
+          // A disk failure is not a successful normal save even if a recovery copy exists.
+          if (this.isElectron && !diskOK) {
+            this._dirty = true; this._force ||= force;
+            this.setState('fallback',String(error?.message || 'Disk unavailable'));
+            showToast('Базу записано в резервне сховище, але файл Backup не збережено. Повторюємо запис.','error');
+            this.scheduleRetry(); return false;
+          }
+          this._retryDelay=2000;
+          if (!this._dirty) {
+            if (!this._preserveEmergency) { try { localStorage.removeItem(STORAGE_KEY+'_emergency'); } catch(e) {} }
+            this.setState('saved');
+          }
+        }
+        return true;
+      },
+      failed(error,force) {
+        this._dirty=true; this._force ||= force;
+        this.setState('error',String(error?.message || error));
+        console.error('DB save:',error); showToast('Помилка локального збереження: '+(error?.message || error),'error');
+        this.scheduleRetry(); return false;
+      },
+      scheduleRetry() {
+        clearTimeout(this._timer);
+        this._timer=setTimeout(()=>this.flush(),this._retryDelay);
+        this._retryDelay=Math.min(this._retryDelay*2,30000);
       },
       emergencySave() {
-        if (!this._dirty && !this._saving) return;
-        try { localStorage.setItem(STORAGE_KEY + '_emergency', JSON.stringify(db)); }
-        catch (e) { console.error('Emergency save:', e); }
+        if (!this._dirty && !this._saving) return true;
+        if (this._durableRev >= this._rev) return true;
+        try { localStorage.setItem(STORAGE_KEY+'_emergency',JSON.stringify(db)); return true; }
+        catch(e) { console.error('Emergency save:',e); return false; }
       }
     };
 
-    // Explicit mutation scopes keep the archive out of ordinary sync operations.
     function saveDB(forceSnapshot = false, scopes = []) {
-      FirebaseSync.capture(scopes);
-      StorageEngine.save(forceSnapshot);
+      // A Firebase-side/cache invalidation error must not prevent a local write.
+      let result;
+      try { FirebaseSync.capture(scopes); }
+      finally { result = StorageEngine.save(forceSnapshot); }
       FirebaseSync.schedulePush();
+      return result;
     }
-
     const PrinterManager = {
       printers: [],
       async refresh(silent = true) {
@@ -1384,6 +1497,8 @@
       });
       const updateButton = document.getElementById('check-update-all');
       if (updateButton) updateButton.title = t('checkUpdates');
+      applyCompactHeader();
+      StorageEngine.setState(StorageEngine._state,StorageEngine._lastError);
       refreshShellUI();
       renderWorkspace();
     }
@@ -1408,6 +1523,41 @@
       const compact = sb.classList.toggle('sidebar-compact');
       if (icon) icon.style.transform = compact ? 'rotate(180deg)' : '';
       try { localStorage.setItem('sc_sidebar_compact', compact ? '1' : '0'); } catch (e) {}
+    }
+
+    // Device-local layout preference, independent of the shared database.
+    let compactHeaderPreference = null;
+    const compactHeaderMedia = window.matchMedia('(max-height: 760px)');
+    function applyCompactHeader() {
+      const compact = compactHeaderPreference === null ? compactHeaderMedia.matches : compactHeaderPreference;
+      document.getElementById('app-shell')?.classList.toggle('header-compact', compact);
+      const button = document.getElementById('compact-header-toggle');
+      const label = document.getElementById('compact-header-label');
+      const icon = document.getElementById('compact-header-icon');
+      const title = currentLang === 'ru'
+        ? (compact ? 'Развернуть шапку' : 'Свернуть шапку')
+        : (compact ? 'Розгорнути шапку' : 'Згорнути шапку');
+      if (button) {
+        button.title = title;
+        button.setAttribute('aria-label', title);
+        button.setAttribute('aria-pressed', String(compact));
+      }
+      if (label) label.textContent = currentLang === 'ru' ? (compact ? 'Развернуть' : 'Свернуть') : (compact ? 'Розгорнути' : 'Згорнути');
+      if (icon) icon.setAttribute('d', compact ? 'M7 10l5-5 5 5M7 14l5 5 5-5' : 'M7 5l5 5 5-5M7 19l5-5 5 5');
+    }
+    function initCompactHeader() {
+      try {
+        const stored = localStorage.getItem('sc_header_compact');
+        compactHeaderPreference = stored === '1' ? true : stored === '0' ? false : null;
+      } catch (e) {}
+      applyCompactHeader();
+      if (compactHeaderMedia.addEventListener) compactHeaderMedia.addEventListener('change', applyCompactHeader);
+      else if (compactHeaderMedia.addListener) compactHeaderMedia.addListener(applyCompactHeader);
+    }
+    function toggleCompactHeader() {
+      compactHeaderPreference = !(compactHeaderPreference === null ? compactHeaderMedia.matches : compactHeaderPreference);
+      try { localStorage.setItem('sc_header_compact', compactHeaderPreference ? '1' : '0'); } catch (e) {}
+      applyCompactHeader();
     }
 
     function changeBranch(val) {
@@ -1751,7 +1901,7 @@
 
       ws.innerHTML = `
         <div class="orders-page">
-          <div class="orders-fixed-block flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div class="orders-fixed-block orders-title-block flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <h1 class="text-xl font-bold text-gray-900">${escapeHtml(t('ordersTitle'))}</h1>
               <p class="text-xs text-gray-500">${escapeHtml(t('ordersSubtitle'))}</p>
@@ -1762,7 +1912,7 @@
           </div>
 
           <!-- KPI CARDS -->
-          <div class="orders-fixed-block grid grid-cols-2 sm:grid-cols-5 gap-2.5">
+          <div class="orders-fixed-block orders-kpi-block grid grid-cols-2 sm:grid-cols-5 gap-2.5">
             <div onclick="ordersTab='active'; ordersStatusFilter='all'; renderWorkspace();" class="bg-white p-3.5 rounded-2xl border border-gray-100 shadow-2xs cursor-pointer hover:border-teal-300 transition-colors">
               <div class="text-lg font-extrabold text-gray-900">${cntActive}</div>
               <div class="text-[11px] text-gray-500 font-medium">${escapeHtml(t('kpiTotal'))}</div>
@@ -1786,7 +1936,7 @@
           </div>
 
           <!-- TABS -->
-          <div class="orders-fixed-block flex flex-wrap items-center gap-1.5 border-b border-gray-200 pb-2">
+          <div class="orders-fixed-block orders-tabs-block flex flex-wrap items-center gap-1.5 border-b border-gray-200 pb-2">
             ${[
               { id: 'active', label: t('tabActiveRepairs'), count: cntActive },
               { id: 'for_issue', label: t('tabForIssue'), count: cntForIssue },
@@ -1802,7 +1952,7 @@
           </div>
 
           <!-- SEARCH & FILTERS -->
-          <div class="orders-fixed-block bg-white p-3.5 rounded-2xl border border-gray-100 shadow-2xs flex flex-col md:flex-row gap-2.5">
+          <div class="orders-fixed-block orders-filter-block bg-white p-3.5 rounded-2xl border border-gray-100 shadow-2xs flex flex-col md:flex-row gap-2.5">
             <div class="flex-1 relative flex items-center">
               <input id="orders-search-input" value="${escapeHtml(ordersSearch)}" oninput="handleOrdersSearchInput(this)" placeholder="${escapeHtml(t('searchPlaceholder'))}" class="w-full rounded-xl border border-gray-200 px-3.5 ${q ? 'pr-8' : ''} py-2 text-xs focus:outline-none focus:border-[#1c6457]" />
               ${q ? `<button type="button" onclick="ordersSearch=''; ordersPageLimit=50; renderWorkspace();" title="Очистити пошук" class="absolute right-2.5 text-gray-400 hover:text-gray-700 font-bold text-xs">✕</button>` : ''}
@@ -4485,12 +4635,15 @@
     function applyClassicReceiptPreset() {
       document.getElementById('rt-layout').value='classic';document.getElementById('rt-paper').value='a5';document.getElementById('rt-orient').value='landscape';document.getElementById('rt-margin').value='6';document.getElementById('rt-font').value='9';document.getElementById('rt-title').value=receiptEditorTab==='issue'?'КВИТАНЦІЯ ПРО ВИДАЧУ':'КВИТАНЦІЯ ПРО ПРИЙОМ';toggleCustomPaperFields();refreshReceiptPreview();
     }
-    function saveReceiptTemplateForm(e, tab) {
+    async function saveReceiptTemplateForm(e, tab) {
       e.preventDefault(); if (!requireDirectorAccess()) return;
       const tpl = readReceiptDraft(tab); if (!tpl) return;
       if (receiptLoadingDrafts.has(tpl)) return showToast('Зачекайте завершення обробки зображення.','error');
-      ensureReceiptTemplates(); db.receiptTemplates[tab] = JSON.parse(JSON.stringify(tpl));
-      saveDB(false, [['receiptTemplates']]); receiptEditorSaved=JSON.stringify(tpl); showToast('Шаблон квитанції збережено!');
+      const savedDraft=JSON.stringify(tpl);
+      ensureReceiptTemplates(); db.receiptTemplates[tab] = JSON.parse(savedDraft);
+      saveDB(false, [['receiptTemplates']]);
+      if (await StorageEngine.flush()) { if (receiptDraft === tpl) receiptEditorSaved=savedDraft; showToast('Шаблон квитанції збережено!'); }
+      else showToast('Шаблон змінено, але запис на диск не підтверджено.','error');
     }
     function renderReceiptImageControls() {
       const box = document.getElementById('rt-images'); if (!box || !receiptDraft) return;
@@ -5118,7 +5271,11 @@
         if (savedLang === 'ru' || savedLang === 'ua') currentLang = savedLang;
       } catch (e) {}
 
-      await StorageEngine.init();
+      initCompactHeader();
+      try { await StorageEngine.init(); } catch(e) {
+        console.error(e); document.getElementById('app-shell')?.classList.add('hidden');
+        alert(e.message + "\nНе створюйте нову базу. Перевірте папку Backup."); return;
+      }
       const repairedDates = normalizeAndMigrateDB();
       ensureReceiptTemplates();
 
@@ -5126,6 +5283,11 @@
       await FirebaseSync.restoreJournal();
       if (repairedDates || StorageEngine._dirty) StorageEngine.save(false);
       window.addEventListener('pagehide', () => StorageEngine.emergencySave());
+      window.addEventListener('beforeunload', event => {
+        if (StorageEngine._durableRev < StorageEngine._rev && (StorageEngine._dirty || StorageEngine._saving)) {
+          if (!StorageEngine.emergencySave()) { event.preventDefault(); event.returnValue = ''; }
+        }
+      });
       document.addEventListener('visibilitychange', () => { if (document.hidden) StorageEngine.flush(); });
       if (window.electronAPI?.onFlushRequest) window.electronAPI.onFlushRequest(async () => {
         const journalOk = !FirebaseSync.target() || await FirebaseSync.persistJournal();
